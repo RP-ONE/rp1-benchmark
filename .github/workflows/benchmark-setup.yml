@@ -28,7 +28,21 @@ jobs:
       - name: Published binary and four-validator benchmark
         run: |
           python3 scripts/benchmark.py private --concurrency 4 --operations-per-envelope 10 --duration 10s
+          cp .rp1-benchmark/private/result.json .rp1-benchmark/private/initial-result.json
+          cp .rp1-benchmark/private/setup.json .rp1-benchmark/private/initial-setup.json
           python3 scripts/benchmark.py private --concurrency 4 --operations-per-envelope 10 --duration 10s
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('.rp1-benchmark/private')
+          for prefix in ('initial-', ''):
+              setup = json.loads((root / (prefix + 'setup.json')).read_text())
+              result = json.loads((root / (prefix + 'result.json')).read_text())
+              assert setup['complete'] and len(setup['validators']) == 4
+              assert not result.get('run_error') and result['workers_stopped']
+              assert result['successful_envelopes'] >= 20
+              assert result['signed_envelopes'] == result['successful_envelopes']
+          PY
       - name: Retain public evidence only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -38,5 +52,7 @@ jobs:
             .rp1-benchmark/private/setup.json
             .rp1-benchmark/private/result.json
             .rp1-benchmark/private/validators.log
+            .rp1-benchmark/private/initial-setup.json
+            .rp1-benchmark/private/initial-result.json
           include-hidden-files: true
           if-no-files-found: warn

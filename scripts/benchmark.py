@@ -186,7 +186,11 @@ def run_benchmark(args, binary, seed_path, rpc_url, rest_url, artifact):
                "--concurrency", str(args.concurrency), "--operations-per-envelope", str(args.operations_per_envelope),
                "--fee-urp1", str(args.fee_urp1), "--gas", str(args.gas), "--poll", args.poll,
                "--output", str(artifact)]
-    subprocess.run(command, check=True)
+    print(f"Running benchmark: {args.concurrency} workers, {args.operations_per_envelope} operations/envelope, {args.duration}", flush=True)
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+    result = json.loads(artifact.read_text())
+    print(f"Committed {result['successful_envelopes']} successful envelopes; "
+          f"{result['operations_per_second']:.2f} operations/s; finality P95 {result['finality_p95']}", flush=True)
 
 
 def local_endpoint(address):
@@ -287,8 +291,9 @@ def main():
     if args.mode == "private" and args.fee_urp1 is None:
         args.fee_urp1 = 0
     state = (args.state_dir or ROOT / ".rp1-benchmark" / args.mode).absolute()
-    config = {"mode": args.mode, "chain_id": args.chain_id, "validators": args.validators,
-              "accounts": args.concurrency, "validator_version": VERSION}
+    config = {"mode": args.mode, "chain_id": args.chain_id,
+              "validators": args.validators if args.mode == "private" else None,
+              "accounts": args.concurrency, "validator_version": VERSION if args.mode == "private" else None}
     os.umask(0o077)
     artifact = {"configuration": config, "platform": platform.platform(), "cpu_count": os.cpu_count(),
                 "started_at": datetime.now(timezone.utc).isoformat(), "complete": False}
