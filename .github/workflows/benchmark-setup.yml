@@ -1,0 +1,42 @@
+name: Benchmark setup
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  private-network:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.24.x'
+          cache: true
+      - name: Client, account, and setup failure checks
+        env:
+          RP1_BENCHMARK_E2E_ARTIFACT_DIR: ${{ runner.temp }}/rp1-client-fixtures
+        run: |
+          go test -race ./...
+          go vet ./...
+          python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Published binary and four-validator benchmark
+        run: |
+          python3 scripts/benchmark.py private --concurrency 4 --operations-per-envelope 10 --duration 10s
+          python3 scripts/benchmark.py private --concurrency 4 --operations-per-envelope 10 --duration 10s
+      - name: Retain public evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: benchmark-setup-evidence
+          path: |
+            .rp1-benchmark/private/setup.json
+            .rp1-benchmark/private/result.json
+            .rp1-benchmark/private/validators.log
+          include-hidden-files: true
+          if-no-files-found: warn

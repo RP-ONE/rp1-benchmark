@@ -1,6 +1,62 @@
 # RP1 benchmark client
 
-This repository is a small, standalone client for measuring signed, batched RP1 transactions. It contains no RP1 node, consensus, application, or private chain source. The daemon and a funded set of test accounts are external prerequisites.
+Run signed, batched RP1 benchmarks with an automatically provisioned private validator network, or against the shared testnet. The setup downloads the official validator binary; private chain source is never required or distributed.
+
+## Private benchmark: one command
+
+Use a **native Linux x86-64 host**, Python **3.10+**, Go **1.24+**, and Git. For a four-validator evaluation, provision a host with at least 8 CPU cores, 16 GiB RAM, SSD storage, and 20 GiB free disk. This is a starting configuration, not a performance guarantee. For capacity measurements, place the load generator on a separate host using the manual client command below. macOS/ARM can run the client against an existing network; the published validator is Linux x86-64 only.
+
+```sh
+git clone https://github.com/RP-ONE/rp1-benchmark.git
+cd rp1-benchmark
+python3 scripts/benchmark.py private
+```
+
+That command:
+
+1. Downloads `rp1d` **0.22.0** and the public licence, notices, provenance, checksums, and signature bundle.
+2. Checks the pinned signed-manifest digest, all asset checksums, archive layout, and provenance before making the binary executable.
+3. Builds the benchmark client and starts **four validators**, using 20 ms batching and 50 ms consensus rounds.
+4. Generates **20 fresh accounts funded in genesis**. Keys stay in a private local directory; no shared funded wallet or faucet key is published.
+5. Waits for distinct validator identities, running consensus, positive heights, and matching retained block height/hash/app hash/time.
+6. Runs a 20-second benchmark with 20 concurrent envelopes, 100 operations per envelope, and 5 ms transaction polling, then stops the validators.
+
+The local network uses `0urp1` minimum gas prices and the default run pays zero fees. This selected configuration is recorded evidence for that run, not a public-network fee policy. REST/gRPC/EVM listeners bind to loopback. The published daemon's managed setup requires wildcard RPC listeners; use a private host/network or firewall those ports. The client connects through loopback.
+
+Outputs are in `.rp1-benchmark/private/`:
+
+| File | Contents |
+| --- | --- |
+| `result.json` | Signed submissions, committed observations, timings, rates, and failures |
+| `setup.json` | Configuration, platform, validator identities, convergence headers, release digest, and setup errors |
+| `validators.log` | Node setup and shutdown output |
+| `network/rp1-benchmark-1/seed-accounts/accounts.json` | Locally generated test keys; keep private |
+| `validator/release-assets/` | Verified distribution assets, licence, and notices |
+
+Repeat the same command to reuse the persisted chain and accounts. A concurrent run is refused. Changing the validator/account count requires a new state directory, preserving the previous network:
+
+```sh
+python3 scripts/benchmark.py private \
+  --state-dir "$HOME/rp1-benchmark-larger" \
+  --validators 4 --concurrency 40 \
+  --operations-per-envelope 1000 --duration 60s
+```
+
+`Ctrl-C` stops the benchmark and validator process group. State is retained for inspection and restart. Setup failures exit nonzero and write a partial `setup.json`; transaction failures retain a partial `result.json`. A downloaded asset that fails verification is never executed. The installer pins the checksum manifest whose Sigstore signature was independently verified; the complete bundle is retained for independent verification using the [release verification instructions](https://github.com/RP-ONE/rp1-releases#install-and-verify).
+
+## Shared testnet
+
+```sh
+python3 scripts/benchmark.py testnet
+```
+
+This discovers the official RPC/REST endpoints from the [public bootstrap manifest](https://testnet.chain.rp.one/bootstrap.json), checks network readiness, creates fresh local accounts, requests tokens from the hosted faucet, and confirms actual native balances before starting the benchmark. Existing funded accounts are reused. Faucet failures, rate limits, and uncertain responses stop the run without automatic claim retries. Funding audits contain addresses and outcomes, never mnemonics. The default fee is calculated from the node's published minimum gas price; `--fee-urp1` selects an explicit amount.
+
+**This command benchmarks existing active testnet validators; it does not attach a new local validator to the running chain.** The current `rp1d testnet join` command configures a candidate observer and admission transactions, but does not synchronize existing application state. A supported state-sync path is needed before fresh-validator joining can be automated reliably. On 15 October 2026 the bootstrap was reachable, RPC/REST returned HTTP 503, and the faucet returned HTTP 403. The command reports those service failures before claiming readiness or sending benchmark traffic.
+
+For existing validator operators, the [validator join guide](https://docs.rp.one/operate/join-validator/) documents the bootstrap and admission commands. Running an isolated private network and participating in the shared chain are separate configurations: a private run has its own genesis, funded accounts, and validators.
+
+## Client workload
 
 The client signs standard Cosmos `bank.MsgMultiSend` transactions with `SIGN_MODE_DIRECT`, broadcasts them through RP1 JSON-RPC, and observes each transaction until it is committed. Every envelope contains several outputs, so the report keeps the two units explicit:
 
@@ -9,9 +65,9 @@ The client signs standard Cosmos `bank.MsgMultiSend` transactions with `SIGN_MOD
 
 The workload keeps one envelope in flight per worker. Increase `--concurrency` for a multi-in-flight run; a one-in-flight run is useful for end-to-end latency and workflow rate, but does not establish saturation capacity.
 
-## Run
+## Run the client separately
 
-Use Go 1.24 or newer, `git clone https://github.com/RP-ONE/rp1-benchmark.git`, then `cd rp1-benchmark`. Point the client at a running RP1 RPC and REST endpoint. A self-hosted validator rig also needs an approved operator-provided `rp1d` binary: the [public release repository](https://github.com/RP-ONE/rp1-releases/releases) currently publishes a signer, not a daemon. This client does not provide node software or require private-source access. The benchmark client itself never needs the private node repository.
+Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.22.0) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
 
 Create a seed file with funded accounts. Keep it outside the repository and mode `0600`:
 
@@ -50,7 +106,7 @@ The client first checks the RPC chain ID, running consensus, and catch-up status
 
 ## Interpreting results
 
-Choose a rig that can sign and submit the configured number of envelopes without becoming the bottleneck. Use multiple funded accounts and meaningful `MsgMultiSend` batches; sending one operation in one envelope measures envelope latency, not the chain's batched operation throughput. Record CPU model and core count, memory, storage, node/Go versions, chain revision, validator count and configuration, network latency, batch size, worker count, and query cadence with every run. Prefer a dedicated load generator so signing and polling do not compete with validators. Agree on this rig and workload with RP1 before a diligence rerun. The public testnet is operated for functional integration and may be scaled down or unavailable; it is not a replica of an earlier multi-validator benchmark deployment.
+Choose a rig that can sign and submit the configured number of envelopes without becoming the bottleneck. Use multiple funded accounts and meaningful `MsgMultiSend` batches; sending one operation in one envelope measures envelope latency, not the chain's batched operation throughput. Record CPU model and core count, memory, storage, node/Go versions, chain revision, validator count and configuration, network latency, batch size, worker count, and query cadence with every run. Prefer a dedicated load generator so signing and polling do not compete with validators. The public testnet is operated for functional integration and may be scaled down or unavailable; it is not a replica of an earlier multi-validator benchmark deployment.
 
 This tool reports only the run it performs. It does not reproduce or certify historical RP1 dashboard figures such as a 613,700 operations/second database-second peak or a sub-350 ms finality result. Those figures came from separately scoped runs and require their original deployment, workload, and raw evidence. The historical peak run had 100 signed envelopes with 6,137 outputs each: 613,700 operations over about 11 seconds. Its dashboard peak used a database-second bucket and is not its whole-run average. This repository does not contain the indexed transaction buckets needed to independently reconstruct that historical peak. It also does not include the private validator-resource and cluster-convergence release gates; do not report its output as a release-gate pass.
 
@@ -58,6 +114,7 @@ This tool reports only the run it performs. It does not reproduce or certify his
 
 ```sh
 RP1_BENCHMARK_E2E_ARTIFACT_DIR=/tmp/rp1-benchmark-e2e go test -race -v ./...
+python3 -m unittest discover -s tests -p 'test_*.py'
 go vet ./...
 go build ./cmd/rp1-benchmark
 ```
