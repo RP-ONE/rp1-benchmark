@@ -1,2 +1,6 @@
 seed-accounts.json
 result.json
+.rp1-benchmark/
+__pycache__/
+/rp1-benchmark
+/rp1-accounts
