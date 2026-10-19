@@ -122,7 +122,7 @@ func main() {
 	flag.DurationVar(&poll, "poll", 50*time.Millisecond, "committed transaction query cadence")
 	flag.IntVar(&concurrency, "concurrency", 20, "simultaneous signed envelopes")
 	flag.IntVar(&ops, "operations-per-envelope", 100, "number of MsgMultiSend outputs in each envelope")
-	flag.Uint64Var(&gas, "gas", 0, "gas limit per envelope; 0 estimates 100000 + 5000 per output")
+	flag.Uint64Var(&gas, "gas", 0, "gas limit per envelope; 0 estimates 100000 + 15000 per output")
 	flag.Uint64Var(&fee, "fee-urp1", 2, "native fee per signed envelope in urp1")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -150,7 +150,7 @@ func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output 
 		}
 	}
 	if gas == 0 {
-		gas = 100000 + uint64(operations)*5000
+		gas = 100000 + uint64(operations)*15000
 	}
 	b, err := os.ReadFile(seedPath)
 	if err != nil {

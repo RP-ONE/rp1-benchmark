@@ -259,7 +259,7 @@ def run_testnet(args, state, artifact):
         match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)urp1", minimum)
         if not match:
             raise RuntimeError("node did not publish a native minimum gas price; specify --fee-urp1 explicitly")
-        gas = args.gas or 100000 + args.operations_per_envelope * 5000
+        gas = args.gas or 100000 + args.operations_per_envelope * 15000
         args.fee_urp1 = int((Decimal(match[1]) * gas).to_integral_value(rounding=ROUND_CEILING))
     build_clients(state / "bin")
     accounts = state / "bin" / "rp1-accounts"
