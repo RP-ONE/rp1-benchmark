@@ -318,7 +318,7 @@ func rpcStatus(ctx context.Context, endpoint string) (networkStatus, error) {
 	if err != nil {
 		return networkStatus{}, err
 	}
-	response, err := httpJSON(ctx, accountHTTPClient, http.MethodPost, strings.TrimRight(endpoint, "/"), body)
+	response, err := httpJSON(ctx, http.MethodPost, strings.TrimRight(endpoint, "/"), body)
 	if err != nil {
 		return networkStatus{}, err
 	}
@@ -359,7 +359,7 @@ func (amount *faucetAmount) UnmarshalJSON(data []byte) error {
 }
 
 func faucetMetadata(ctx context.Context, endpoint string) (faucetInfo, error) {
-	body, err := httpJSON(ctx, faucetHTTPClient, http.MethodGet, endpoint, nil)
+	body, err := httpJSON(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return faucetInfo{}, err
 	}
@@ -372,7 +372,7 @@ func faucetMetadata(ctx context.Context, endpoint string) (faucetInfo, error) {
 
 func queryBalance(ctx context.Context, endpoint, address string) (uint64, error) {
 	url := strings.TrimRight(endpoint, "/") + "/cosmos/bank/v1beta1/balances/" + url.PathEscape(address) + "/by_denom?denom=" + url.QueryEscape(defaultDenom)
-	body, err := httpJSON(ctx, accountHTTPClient, http.MethodGet, url, nil)
+	body, err := httpJSON(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -396,7 +396,7 @@ func claimAndWait(ctx context.Context, cfg fundConfig, address string) error {
 	if err != nil {
 		return err
 	}
-	response, err := httpJSON(ctx, faucetHTTPClient, http.MethodPost, cfg.faucetURL, body)
+	response, err := httpJSON(ctx, http.MethodPost, cfg.faucetURL, body)
 	if err != nil {
 		return fmt.Errorf("faucet claim: %w", err)
 	}
@@ -432,13 +432,10 @@ func claimAndWait(ctx context.Context, cfg fundConfig, address string) error {
 	}
 }
 
-var (
-	accountHTTPClient = &http.Client{Timeout: 15 * time.Second}
-	faucetHTTPClient  = newFaucetHTTPClient()
-)
+var fundingHTTPClient = newFundingHTTPClient()
 
-func newFaucetHTTPClient() *http.Client {
-	// The public faucet can stall Go HTTP/2 connections before response headers.
+func newFundingHTTPClient() *http.Client {
+	// Public setup endpoints can stall Go HTTP/2 connections before response headers.
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	return &http.Client{
@@ -452,7 +449,7 @@ func newFaucetHTTPClient() *http.Client {
 	}
 }
 
-func httpJSON(ctx context.Context, client *http.Client, method, endpoint string, body []byte) ([]byte, error) {
+func httpJSON(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -464,7 +461,7 @@ func httpJSON(ctx context.Context, client *http.Client, method, endpoint string,
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	response, err := client.Do(req)
+	response, err := fundingHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
