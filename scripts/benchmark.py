@@ -266,9 +266,10 @@ def run_testnet(args, state, artifact):
     seeds = state / "accounts.json"
     if not seeds.exists():
         subprocess.run([str(accounts), "create", "--chain-id", args.chain_id, "--count", str(args.concurrency), "--output", str(seeds)], check=True)
+    funding_timeout = max(args.startup_timeout, args.concurrency * 30)
     subprocess.run([str(accounts), "fund", "--seed-accounts-file", str(seeds), "--rpc", rpc_url,
                     "--rest", rest_url, "--faucet-url", FAUCET_URL, "--output", str(state / "funding.json"),
-                    "--timeout", str(args.startup_timeout) + "s"], check=True)
+                    "--timeout", str(funding_timeout) + "s"], check=True)
     run_benchmark(args, state / "bin" / "rp1-benchmark", seeds, rpc_url, rest_url, state / "result.json")
 
 

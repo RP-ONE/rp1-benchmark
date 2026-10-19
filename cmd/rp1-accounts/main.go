@@ -432,6 +432,23 @@ func claimAndWait(ctx context.Context, cfg fundConfig, address string) error {
 	}
 }
 
+var fundingHTTPClient = newFundingHTTPClient()
+
+func newFundingHTTPClient() *http.Client {
+	// Public setup endpoints can stall Go HTTP/2 connections before response headers.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			Protocols:           protocols,
+			TLSHandshakeTimeout: 10 * time.Second,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+}
+
 func httpJSON(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
@@ -444,7 +461,7 @@ func httpJSON(ctx context.Context, method, endpoint string, body []byte) ([]byte
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	response, err := fundingHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
