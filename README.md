@@ -96,13 +96,13 @@ go run ./cmd/rp1-benchmark \
   --duration 20s \
   --concurrency 20 \
   --operations-per-envelope 100 \
-  --gas 600000 \
-  --fee-urp1 2 \
+  --gas 1600000 \
+  --fee-urp1 10 \
   --poll 5ms \
   --output result.json
 ```
 
-The client first checks the RPC chain ID, running consensus, and catch-up status. The REST endpoint reads account number and sequence. `--gas 0` estimates 100,000 plus 5,000 per output; set gas and fee for the actual deployment and batch size. A chosen fee proves only that run, not a sustainable fee minimum. The JSON-RPC endpoint handles broadcasts and committed transaction queries. The JSON includes every signed attempt, SHA-256 hash, signer/account/sequence, outcome, error, and submission/queue/observation timestamps. Counts are derived from those attempts. Both rates use the full elapsed workflow, including finality drain. Only code-zero committed outputs count as operations; finality percentiles include committed execution failures. An uncertain broadcast is never automatically resubmitted. Any broadcast, observation, or execution failure exits nonzero after writing a partial artifact with `run_error`. Fewer than 20 committed observations cannot support a finality claim.
+The client first checks the RPC chain ID, running consensus, and catch-up status. The REST endpoint reads account number and sequence. `--gas 0` estimates 100,000 plus 15,000 per output; set gas and fee for the actual deployment and batch size. A chosen fee proves only that run, not a sustainable fee minimum. The JSON-RPC endpoint handles broadcasts and committed transaction queries. The JSON includes every signed attempt, SHA-256 hash, signer/account/sequence, outcome, error, and submission/queue/observation timestamps. Counts are derived from those attempts. Both rates use the full elapsed workflow, including finality drain. Only code-zero committed outputs count as operations; finality percentiles include committed execution failures. An uncertain broadcast is never automatically resubmitted. Any broadcast, observation, or execution failure exits nonzero after writing a partial artifact with `run_error`. Fewer than 20 committed observations cannot support a finality claim.
 
 ## Interpreting results
 
