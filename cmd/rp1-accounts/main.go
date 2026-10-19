@@ -438,11 +438,18 @@ var (
 )
 
 func newFaucetHTTPClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// The public faucet can stall Go HTTP/2 connections before response headers.
-	transport.Protocols = new(http.Protocols)
-	transport.Protocols.SetHTTP1(true)
-	return &http.Client{Timeout: 15 * time.Second, Transport: transport}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			Protocols:           protocols,
+			TLSHandshakeTimeout: 10 * time.Second,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 }
 
 func httpJSON(ctx context.Context, client *http.Client, method, endpoint string, body []byte) ([]byte, error) {
