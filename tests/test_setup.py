@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -68,6 +69,17 @@ class SetupChecks(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
+
+    def test_legacy_profile_runs_exact_batched_workload(self):
+        captured = []
+        def run(args, state, artifact):
+            captured.append((args.envelopes, args.operations_per_envelope, args.concurrency, args.duration))
+        argv = ["benchmark.py", "private", "--profile", "legacy-6137", "--state-dir", str(self.root)]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(benchmark.platform, "system", return_value="Linux"), \
+                mock.patch.object(benchmark.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(benchmark, "run_private", side_effect=run):
+            self.assertEqual(benchmark.main(), 0)
+        self.assertEqual(captured, [(100, 6137, 100, "120s")])
 
     def test_head_convergence_requires_matching_state(self):
         endpoints = [self.first.url, self.second.url]

@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from release import ARCHIVE_SHA256, VERSION, install_release
+from local_runtime import run_local_container
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP_URL = "https://testnet.chain.rp.one/bootstrap.json"
@@ -220,6 +221,7 @@ def run_benchmark(args, binary, seed_path, rpc_url, rest_url, artifact):
     command = [str(binary), "--rpc", rpc_url, "--rest", rest_url, "--chain-id", args.chain_id,
                "--seed-accounts-file", str(seed_path), "--duration", args.duration,
                "--concurrency", str(args.concurrency), "--operations-per-envelope", str(args.operations_per_envelope),
+               "--envelopes", str(args.envelopes),
                "--fee-urp1", str(args.fee_urp1), "--gas", str(args.gas), "--poll", args.poll,
                "--output", str(artifact)]
     print(f"Running benchmark: {args.concurrency} workers, {args.operations_per_envelope} operations/envelope, {args.duration}", flush=True)
@@ -455,9 +457,11 @@ def main():
     parser.add_argument("mode", choices=("private", "testnet", "joined-testnet"))
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--validators", type=int, default=4, help="private network validators (1..32)")
-    parser.add_argument("--concurrency", type=int, default=20)
-    parser.add_argument("--operations-per-envelope", type=int, default=100)
-    parser.add_argument("--duration", default="20s")
+    parser.add_argument("--profile", choices=("legacy-6137",), help="private workload: 100 envelopes of 6,137 outputs")
+    parser.add_argument("--envelopes", type=int, help="exact envelope count; zero uses the duration window")
+    parser.add_argument("--concurrency", type=int)
+    parser.add_argument("--operations-per-envelope", type=int)
+    parser.add_argument("--duration", help="admission time limit (default 20s; legacy profile 120s)")
     parser.add_argument("--poll", default="5ms")
     parser.add_argument("--fee-urp1", type=int, help="default: zero privately; node minimum on shared testnet")
     parser.add_argument("--gas", type=int, default=0)
@@ -467,9 +471,18 @@ def main():
     parser.add_argument("--join-rest-port", type=int, default=1317)
     parser.add_argument("--join-grpc-port", type=int, default=9090)
     args = parser.parse_args()
+    if args.profile:
+        if args.mode != "private":
+            parser.error("legacy-6137 is an isolated private-network profile")
+        if args.envelopes not in (None, 100) or args.operations_per_envelope not in (None, 6137):
+            parser.error("legacy-6137 requires 100 envelopes and 6137 operations per envelope")
+    args.envelopes = args.envelopes if args.envelopes is not None else (100 if args.profile else 0)
+    args.operations_per_envelope = args.operations_per_envelope if args.operations_per_envelope is not None else (6137 if args.profile else 100)
+    args.concurrency = args.concurrency if args.concurrency is not None else (100 if args.profile else 20)
+    args.duration = args.duration or ("120s" if args.profile else "20s")
     join_ports = (args.join_consensus_port, args.join_rpc_port, args.join_rest_port, args.join_grpc_port)
     if (not 1 <= args.validators <= 32 or not 1 <= args.concurrency <= 4096 or not 1 <= args.operations_per_envelope <= 100000
-            or args.startup_timeout <= 0 or args.gas < 0 or any(not 1 <= port <= 65535 for port in join_ports)
+            or args.envelopes < 0 or args.startup_timeout <= 0 or args.gas < 0 or any(not 1 <= port <= 65535 for port in join_ports)
             or len(set(join_ports)) != len(join_ports) or (args.fee_urp1 is not None and args.fee_urp1 < 0)):
         parser.error("invalid validator count, concurrency, batch size, timeout, gas, or fee")
     args.chain_id = "rp1-benchmark-1" if args.mode == "private" else "chain-1"
@@ -483,8 +496,19 @@ def main():
         config["observer_ports"] = list(join_ports)
     os.umask(0o077)
     artifact = {"configuration": config, "platform": platform.platform(), "cpu_count": os.cpu_count(),
-                "started_at": datetime.now(timezone.utc).isoformat(), "complete": False}
+                "started_at": datetime.now(timezone.utc).isoformat(), "complete": False,
+                "workload": {"profile": args.profile, "envelopes": args.envelopes,
+                             "operations_per_envelope": args.operations_per_envelope,
+                             "concurrency": args.concurrency, "admission_limit": args.duration, "poll": args.poll}}
+    if os.environ.get("RP1_BENCHMARK_HOST_PLATFORM"):
+        artifact["local_container"] = {"host_platform": os.environ["RP1_BENCHMARK_HOST_PLATFORM"],
+                                       "host_cpu_count": os.environ.get("RP1_BENCHMARK_HOST_CPUS"),
+                                       "validator_platform": "linux/amd64",
+                                       "note": "Translated execution on ARM validates functionality, not native capacity."}
     try:
+        if args.mode != "testnet" and (platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64")):
+            print("Starting local Linux x86-64 container; translated execution is for functional testing on ARM.", flush=True)
+            return run_local_container(["scripts/benchmark.py", *sys.argv[1:]], state)
         with Session(state, config):
             try:
                 if args.mode == "private":
