@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -231,6 +233,62 @@ func TestFundAccountsAcceptedClaimTimesOutAndWritesPartialAudit(t *testing.T) {
 		t.Fatal("expected balance timeout")
 	}
 	assertFundingAudit(t, out, 1)
+}
+
+// The public faucet can wait up to 60 seconds for a committed receipt.
+func TestClaimAndWaitAllowsDelayedFaucetResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(16 * time.Second):
+			}
+			_, _ = w.Write([]byte(`{"success":true,"tx_hash":"ABC"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"balance":{"denom":"urp1","amount":"1000000"}}`))
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := claimAndWait(ctx, fundConfig{faucetURL: server.URL, restURL: server.URL, minimum: 1000000}, "rp1-test"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaimAndWaitPendingResponseWaitsForBalanceWithoutReposting(t *testing.T) {
+	for _, funded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("funded=%t", funded), func(t *testing.T) {
+			var posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					posts.Add(1)
+					w.WriteHeader(http.StatusAccepted)
+					_, _ = w.Write([]byte(`{"success":false,"pending":true,"tx_hash":"ABC"}`))
+					return
+				}
+				amount := "0"
+				if funded {
+					amount = "1000000"
+				}
+				_, _ = fmt.Fprintf(w, `{"balance":{"denom":"urp1","amount":"%s"}}`, amount)
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			err := claimAndWait(ctx, fundConfig{faucetURL: server.URL, restURL: server.URL, minimum: 1000000}, "rp1-test")
+			if funded && err != nil {
+				t.Fatal(err)
+			}
+			if !funded && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("unfunded claim error = %v, want deadline", err)
+			}
+			if posts.Load() != 1 {
+				t.Fatalf("posts = %d, want one claim", posts.Load())
+			}
+		})
+	}
 }
 
 func generatedSeeds(t *testing.T, count int) seedFile {
