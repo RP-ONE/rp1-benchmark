@@ -223,6 +223,7 @@ def run_benchmark(args, binary, seed_path, rpc_url, rest_url, artifact):
                "--concurrency", str(args.concurrency), "--operations-per-envelope", str(args.operations_per_envelope),
                "--envelopes", str(args.envelopes),
                "--fee-urp1", str(args.fee_urp1), "--gas", str(args.gas), "--poll", args.poll,
+               "--finality-timeout", args.finality_timeout,
                "--output", str(artifact)]
     print(f"Running benchmark: {args.concurrency} workers, {args.operations_per_envelope} operations/envelope, {args.duration}", flush=True)
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
@@ -462,7 +463,8 @@ def main():
     parser.add_argument("--concurrency", type=int)
     parser.add_argument("--operations-per-envelope", type=int)
     parser.add_argument("--duration", help="admission time limit (default 20s; legacy profile 120s)")
-    parser.add_argument("--poll", default="5ms")
+    parser.add_argument("--poll", help="committed transaction query cadence (default 5ms; legacy profile 50ms)")
+    parser.add_argument("--finality-timeout", default="30s", help="maximum wait per transaction (default 30s)")
     parser.add_argument("--fee-urp1", type=int, help="default: zero privately; node minimum on shared testnet")
     parser.add_argument("--gas", type=int, default=0)
     parser.add_argument("--startup-timeout", type=float, default=180)
@@ -480,6 +482,7 @@ def main():
     args.operations_per_envelope = args.operations_per_envelope if args.operations_per_envelope is not None else (6137 if args.profile else 100)
     args.concurrency = args.concurrency if args.concurrency is not None else (100 if args.profile else 20)
     args.duration = args.duration or ("120s" if args.profile else "20s")
+    args.poll = args.poll or ("50ms" if args.profile else "5ms")
     join_ports = (args.join_consensus_port, args.join_rpc_port, args.join_rest_port, args.join_grpc_port)
     if (not 1 <= args.validators <= 32 or not 1 <= args.concurrency <= 4096 or not 1 <= args.operations_per_envelope <= 100000
             or args.envelopes < 0 or args.startup_timeout <= 0 or args.gas < 0 or any(not 1 <= port <= 65535 for port in join_ports)
@@ -499,7 +502,8 @@ def main():
                 "started_at": datetime.now(timezone.utc).isoformat(), "complete": False,
                 "workload": {"profile": args.profile, "envelopes": args.envelopes,
                              "operations_per_envelope": args.operations_per_envelope,
-                             "concurrency": args.concurrency, "admission_limit": args.duration, "poll": args.poll}}
+                             "concurrency": args.concurrency, "admission_limit": args.duration,
+                             "finality_timeout": args.finality_timeout, "poll": args.poll}}
     if os.environ.get("RP1_BENCHMARK_HOST_PLATFORM"):
         artifact["local_container"] = {"host_platform": os.environ["RP1_BENCHMARK_HOST_PLATFORM"],
                                        "host_cpu_count": os.environ.get("RP1_BENCHMARK_HOST_CPUS"),

@@ -50,7 +50,7 @@ python3 scripts/benchmark.py private \
 python3 scripts/benchmark.py private --profile legacy-6137
 ```
 
-This starts four local validators and sends **exactly 100 signed envelopes with 6,137 outputs each**, totaling **613,700 operations**, with up to 100 envelopes in flight. It generates 100 funded local accounts. The admission deadline is 120 seconds; reaching it before the requested work completes fails the run and retains partial evidence. Finality drain is bounded separately by the client. Adjust `--concurrency` or `--duration` for the machine while retaining the exact output and envelope counts. For example, `--concurrency 20 --duration 180s` sends the same total work with fewer envelopes in flight.
+This starts four local validators and sends **exactly 100 signed envelopes with 6,137 outputs each**, totaling **613,700 operations**, with up to 100 envelopes in flight. It generates 100 funded local accounts. The admission deadline is 120 seconds; reaching it before the requested work completes fails the run and retains partial evidence. Finality drain is bounded separately by the client at 30 seconds per transaction by default. The legacy profile polls committed transactions every 50 ms to keep observation traffic proportional to the batch workload; use `--poll 5ms` when you explicitly need the normal client cadence. Set `--finality-timeout 45s` (or another Go duration) when the target chain needs a longer observation window. Adjust `--concurrency` or `--duration` for the machine while retaining the exact output and envelope counts. For example, `--concurrency 20 --duration 180s` sends the same total work with fewer envelopes in flight.
 
 The profile reproduces the documented envelope/output counts. Original hardware, pacing and indexed database-second buckets are not retained in this repository, so it cannot certify the historical peak. Its reported rate is the measured whole workflow including drain. Inspect finality P50/P95/P99 and require at least 20 committed observations. Keep the hardware, runtime/translation, concurrency and polling cadence with the result; `setup.json` records container host details when applicable.
 
@@ -100,7 +100,7 @@ The client signs standard Cosmos `bank.MsgMultiSend` transactions with `SIGN_MOD
 * `signed_envelopes_per_second` counts signed transactions.
 * `operations_per_second` counts successful `MsgMultiSend` outputs (`operations_per_envelope` times committed envelopes).
 
-`--envelopes N` selects an exact finite workload; zero (the default) submits for the configured duration. The duration bounds admission in both cases; a finite run that cannot complete every requested envelope fails. The workload keeps one envelope in flight per worker. Increase `--concurrency` for a multi-in-flight run; a one-in-flight run is useful for end-to-end latency and workflow rate, but does not establish saturation capacity.
+`--envelopes N` selects an exact finite workload; zero (the default) submits for the configured duration. The duration bounds admission in both cases; a finite run that cannot complete every requested envelope fails. The workload keeps one envelope in flight per worker. `--poll` controls the committed-transaction query cadence (5 ms for the normal client, 50 ms for `legacy-6137` unless explicitly overridden), while `--finality-timeout` bounds the wait for each transaction and defaults to 30 seconds. Increase `--concurrency` for a multi-in-flight run; a one-in-flight run is useful for end-to-end latency and workflow rate, but does not establish saturation capacity.
 
 ## Run the client separately
 
@@ -136,6 +136,7 @@ go run ./cmd/rp1-benchmark \
   --envelopes 0 \
   --gas 1600000 \
   --fee-urp1 10 \
+  --finality-timeout 30s \
   --poll 5ms \
   --output result.json
 ```
