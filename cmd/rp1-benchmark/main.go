@@ -60,6 +60,7 @@ type account struct {
 type rpcClient struct {
 	endpoint string
 	http     *http.Client
+	txSlots  chan struct{}
 	id       atomic.Uint64
 }
 type rpcResponse struct {
@@ -425,7 +426,11 @@ func newRPCClient(endpoint string, concurrency int) *rpcClient {
 	transport.MaxIdleConnsPerHost = concurrency
 	transport.MaxIdleConns = concurrency
 	transport.MaxConnsPerHost = concurrency
-	return &rpcClient{endpoint: strings.TrimRight(endpoint, "/"), http: &http.Client{Timeout: 15 * time.Second, Transport: transport}}
+	lookupConcurrency := concurrency
+	if lookupConcurrency > 8 {
+		lookupConcurrency = 8
+	}
+	return &rpcClient{endpoint: strings.TrimRight(endpoint, "/"), http: &http.Client{Timeout: 15 * time.Second, Transport: transport}, txSlots: make(chan struct{}, lookupConcurrency)}
 }
 
 func (r *rpcClient) broadcast(ctx context.Context, raw []byte) error {
@@ -458,7 +463,13 @@ func (r *rpcClient) waitTx(ctx context.Context, hash string, expected []byte, po
 				Code uint32 `json:"code"`
 			} `json:"tx_result"`
 		}
+		select {
+		case r.txSlots <- struct{}{}:
+		case <-ctx.Done():
+			return 0, 0, ctx.Err()
+		}
 		err := r.call(ctx, "tx", map[string]string{"hash": "0x" + hash}, &v)
+		<-r.txSlots
 		if err == nil {
 			h, parseErr := strconv.ParseInt(v.Height, 10, 64)
 			decoded, decodeErr := base64.StdEncoding.DecodeString(v.Tx)

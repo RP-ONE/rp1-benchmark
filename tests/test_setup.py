@@ -80,7 +80,7 @@ class SetupChecks(unittest.TestCase):
                 mock.patch.object(benchmark.platform, "machine", return_value="x86_64"), \
                 mock.patch.object(benchmark, "run_private", side_effect=run):
             self.assertEqual(benchmark.main(), 0)
-        self.assertEqual(captured, [(100, 6137, 100, "120s", "50ms", "30s")])
+        self.assertEqual(captured, [(100, 6137, 100, "120s", "50ms", "120s")])
 
     def test_legacy_profile_allows_explicit_cadence_and_timeout(self):
         captured = []

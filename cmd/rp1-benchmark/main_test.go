@@ -36,13 +36,17 @@ func TestRunFixtureBindsSignedMultisendAndPersistsResult(t *testing.T) {
 		name           string
 		ops, envelopes int
 		duration       time.Duration
+		workers        int
+		pressure       bool
 	}{
-		{"duration", 2, 0, 20 * time.Millisecond},
-		{"finite_6137", 6137, 3, 2 * time.Second},
+		{"duration", 2, 0, 20 * time.Millisecond, 2, false},
+		{"finite_6137", 6137, 3, 2 * time.Second, 2, false},
+		{"receipt_pressure", 2, 32, 5 * time.Second, 32, true},
 	} {
 		t.Run(workload.name, func(t *testing.T) {
-			seeds := fixtureSeeds(t, 2)
+			seeds := fixtureSeeds(t, workload.workers)
 			var mu sync.Mutex
+			var activeTx, maxActiveTx atomic.Int32
 			var submitted []string
 			sequences := map[string]uint64{}
 			byHash := map[string][]byte{}
@@ -61,6 +65,21 @@ func TestRunFixtureBindsSignedMultisendAndPersistsResult(t *testing.T) {
 				}
 				_ = json.NewDecoder(r.Body).Decode(&req)
 				w.Header().Set("Content-Type", "application/json")
+				if workload.pressure && req.Method == "tx" {
+					active := activeTx.Add(1)
+					for {
+						max := maxActiveTx.Load()
+						if active <= max || maxActiveTx.CompareAndSwap(max, active) {
+							break
+						}
+					}
+					defer activeTx.Add(-1)
+					time.Sleep(10 * time.Millisecond)
+					if active > 8 {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+				}
 				mu.Lock()
 				defer mu.Unlock()
 				switch req.Method {
@@ -151,8 +170,11 @@ func TestRunFixtureBindsSignedMultisendAndPersistsResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			output := fixtureOutput(t)
-			if err := run(context.Background(), server.URL, server.URL, "fixture-1", seedPath, "urp1", output, workload.duration, time.Second, time.Millisecond, 2, workload.ops, 0, 2, workload.envelopes); err != nil {
+			if err := run(context.Background(), server.URL, server.URL, "fixture-1", seedPath, "urp1", output, workload.duration, time.Second, time.Millisecond, workload.workers, workload.ops, 0, 2, workload.envelopes); err != nil {
 				t.Fatal(err)
+			}
+			if workload.pressure && maxActiveTx.Load() > 8 {
+				t.Fatalf("receipt lookup concurrency reached %d", maxActiveTx.Load())
 			}
 			mu.Lock()
 			count := len(submitted)
