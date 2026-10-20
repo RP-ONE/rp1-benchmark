@@ -14,7 +14,7 @@ python3 scripts/benchmark.py private
 
 That command:
 
-1. Downloads `rp1d` **0.22.0** and the public licence, notices, provenance, checksums, and signature bundle.
+1. Downloads `rp1d` **0.25.4** and the public licence, notices, provenance, checksums, and signature bundle.
 2. Checks the pinned signed-manifest digest, all asset checksums, archive layout, and provenance before making the binary executable.
 3. Builds the benchmark client and starts **four validators**, using 20 ms batching and 50 ms consensus rounds.
 4. Generates **20 fresh accounts funded in genesis**. Keys stay in a private local directory; no shared funded wallet or faucet key is published.
@@ -52,19 +52,36 @@ python3 scripts/benchmark.py testnet
 
 This discovers the official RPC/REST endpoints from the [public bootstrap manifest](https://testnet.chain.rp.one/bootstrap.json), checks network readiness, creates fresh local accounts, requests tokens from the hosted faucet, and confirms actual native balances before starting the benchmark. Existing funded accounts are reused. Faucet failures, rate limits, and uncertain responses stop the run without automatic claim retries. Funding audits contain addresses and outcomes, never mnemonics. The default fee is calculated from the node's published minimum gas price; `--fee-urp1` selects an explicit amount.
 
-**This command benchmarks existing active testnet validators; it does not attach a new local validator to the running chain.** The pinned 0.22.0 `rp1d testnet join` command only configures a candidate observer and cannot synchronize existing application state. The separate `joined-testnet` mode below uses the newer state-sync join path when its approved daemon release is available. Public RPC/REST and fresh-account faucet funding were verified on 20 October 2026. Service failures stop setup before benchmark traffic starts.
+This command benchmarks existing active testnet validators. To synchronize a fresh local observer with the running chain first, use `joined-testnet` below. Public RPC/REST and fresh-account faucet funding were verified on 20 October 2026. Service failures stop setup before benchmark traffic starts.
 
 ## Joined testnet observer
 
-After a state-sync-capable validator release is published, a fresh observer can be synchronized and benchmarked with:
+Synchronize a fresh observer and run the shared-chain benchmark with:
 
 ```sh
 python3 scripts/benchmark.py joined-testnet
 ```
 
-This mode downloads and verifies the official validator release, refuses releases that do not expose `testnet join --state-sync`, creates a fresh private observer home, and joins from the HTTPS public bootstrap manifest. It waits for the observer and public RPC to agree on block hash, application hash, and block time at a common retained height, stops and restarts the observer, and requires continued height progress before requesting fresh accounts from the faucet. Signed benchmark traffic is sent through the active public RPC/REST endpoints because an observer is read-only; each committed hash is then checked through the observer's REST history. The observer remains a non-voting node; no validator admission transaction or shared private key is used. The current pinned 0.22.0 release does not provide this capability, so the command fails clearly until the approved release pin is updated.
+This mode downloads and verifies the official validator release, refuses releases that do not expose `testnet join --state-sync`, creates a fresh private observer home, and joins from the HTTPS public bootstrap manifest. It waits for the observer and public RPC to agree on block hash, application hash, and block time at a common retained height, stops and restarts the observer, and requires continued height progress before requesting fresh accounts from the faucet. Signed benchmark traffic is sent through the active public RPC/REST endpoints because an observer is read-only; each committed hash is then checked through the observer's REST history. The observer remains a non-voting node; no validator admission transaction or shared private key is used.
 
 For existing validator operators, the [validator join guide](https://docs.rp.one/operate/join-validator/) documents the bootstrap and admission commands. Running an isolated private network and participating in the shared chain are separate configurations: a private run has its own genesis, funded accounts, and validators.
+
+## Module testing links and CLI
+
+Use the [wallet module page](https://app.rp.one/modules), [testnet faucet](https://app.rp.one/faucet), or [MCP endpoint](https://mcp.rp.one/mcp) for treasury approvals, institutional mint/redeem and MPP charges/refunds. The wallet reviews each action before local signing and shows the committed hash, height and created entity IDs. If an outcome is unknown, reconcile the existing hash before submitting another action.
+
+The same official validator binary includes native query and transaction commands:
+
+```sh
+rp1d query enterprise --help
+rp1d tx enterprise --help
+rp1d query stables --help
+rp1d tx stables --help
+rp1d query mpp --help
+rp1d tx mpp --help
+```
+
+Use `--node https://testnet.rpc.rp.one --chain-id chain-1` with your own local keyring. Treasury payments enforce the configured approvers and threshold. Institutional minting requires a governance-approved denom, its authorized issuer and matching native reserves; holders can redeem issued tokens. MPP payment commands bind the expected amount, denom and recipient before settlement. Public test assets have no monetary value.
 
 ## Client workload
 
@@ -77,7 +94,7 @@ The workload keeps one envelope in flight per worker. Increase `--concurrency` f
 
 ## Run the client separately
 
-Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.22.0) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
+Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.25.4) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
 
 Create a seed file with funded accounts. Keep it outside the repository and mode `0600`:
 
