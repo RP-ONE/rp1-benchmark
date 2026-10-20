@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
@@ -172,6 +173,41 @@ def wait_ready(endpoints, chain_id, timeout, child=None):
     raise RuntimeError(f"validator readiness/convergence timed out: {last_error}")
 
 
+def wait_join_ready(endpoints, chain_id, timeout, child):
+    """Compare the same retained block while independently advancing nodes run."""
+    deadline, last_error = time.monotonic() + timeout, "waiting for retained history"
+    with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
+        while time.monotonic() < deadline:
+            child.check()
+            try:
+                futures = [pool.submit(capture_node, endpoint, chain_id, 1) for endpoint in endpoints]
+                nodes = [future.result() for future in futures]
+                if len({node["node_id"] for node in nodes}) != len(nodes):
+                    raise RuntimeError("duplicate validator node identity")
+                height = min(int(node["header"]["header"]["height"]) for node in nodes)
+                futures = [pool.submit(http_json, endpoint + f"/state-sync/blocks/{height}") for endpoint in endpoints]
+                blocks = [future.result() for future in futures]
+                headers = [{key: block[key] for key in ("Height", "BlockHash", "AppHash", "Time")} for block in blocks]
+                if any(header != headers[0] for header in headers) or int(headers[0]["Height"]) != height:
+                    raise RuntimeError("joined node history differs at the common height")
+                hashes = [base64.b64decode(headers[0][key], validate=True) for key in ("BlockHash", "AppHash")]
+                if any(len(value) != 32 for value in hashes):
+                    raise RuntimeError("invalid retained block hash")
+                for node in nodes:
+                    head = node["header"]
+                    if int(head["header"]["height"]) == height and (
+                            head["block_id"]["hash"].lower() != hashes[0].hex()
+                            or head["header"]["app_hash"].lower() != hashes[1].hex()
+                            or head["header"]["time"] != headers[0]["Time"]):
+                        raise RuntimeError("retained history does not match the canonical header")
+                    node["common_block"] = headers[0]
+                return nodes
+            except (RuntimeError, KeyError, TypeError, ValueError) as error:
+                last_error = str(error)
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+    raise RuntimeError(f"joined validator readiness timed out: {last_error}")
+
+
 def build_clients(directory):
     if not shutil.which("go"):
         raise RuntimeError("Go 1.24+ is required; install Go, then rerun the same command")
@@ -193,11 +229,100 @@ def run_benchmark(args, binary, seed_path, rpc_url, rest_url, artifact):
           f"{result['operations_per_second']:.2f} operations/s; finality P95 {result['finality_p95']}", flush=True)
 
 
+def resolve_fee(args, rest_url):
+    if args.fee_urp1 is not None:
+        return
+    minimum = http_json(rest_url + "/cosmos/base/node/v1beta1/config").get("minimum_gas_price", "")
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)urp1", minimum)
+    if not match:
+        raise RuntimeError("node did not publish a native minimum gas price; specify --fee-urp1 explicitly")
+    gas = args.gas or 100000 + args.operations_per_envelope * 15000
+    args.fee_urp1 = int((Decimal(match[1]) * gas).to_integral_value(rounding=ROUND_CEILING))
+
+
 def local_endpoint(address):
     parsed = urlparse(address.replace("tcp://", "http://"))
     if parsed.hostname not in ("127.0.0.1", "0.0.0.0") or not parsed.port:
         raise RuntimeError("managed network published an unexpected listener")
     return f"http://127.0.0.1:{parsed.port}"
+
+
+def require_join_capability(daemon, help_output=None):
+    """Require the state-sync join command from the verified daemon release."""
+    if help_output is None:
+        try:
+            help_output = subprocess.check_output(
+                [str(daemon), "testnet", "join", "--help"], text=True, stderr=subprocess.STDOUT
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise RuntimeError(
+                "verified validator release does not expose the state-sync join command; "
+                "the pinned public release must be updated before joined-testnet can run"
+            ) from error
+    if "--state-sync" not in help_output:
+        raise RuntimeError(
+            "verified validator release is not state-sync-capable; the pinned public release "
+            "must be updated before joined-testnet can run"
+        )
+
+
+def join_command(daemon, home, bootstrap_url, listen_addr):
+    return [str(daemon), "testnet", "join", "--state-sync=true", "--bootstrap-url", bootstrap_url,
+            "--home", str(home), "--consensus.listen-addr", listen_addr]
+
+
+def enable_observer_api(home, address):
+    """Enable loopback REST in the freshly joined home without replacing its files."""
+    path = home / "config" / "app.toml"
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = content.splitlines()
+    section = next((i for i, line in enumerate(lines) if line.strip() == "[api]"), None)
+    if section is None:
+        lines.extend(["", "[api]", "enable = true", f'address = "tcp://{address}"'])
+    else:
+        end = next((i for i in range(section + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+        found = {"enable": False, "address": False}
+        for i in range(section + 1, end):
+            key = lines[i].split("=", 1)[0].strip()
+            if key in found:
+                lines[i] = "enable = true" if key == "enable" else f'address = "tcp://{address}"'
+                found[key] = True
+        insert = end
+        for key, value in (("enable", "enable = true"), ("address", f'address = "tcp://{address}"')):
+            if not found[key]:
+                lines.insert(insert, value)
+                insert += 1
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def verify_observer_replication(rest_url, result_path, timeout=30):
+    """Check every committed workload hash through the observer's REST history."""
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    committed = [attempt for attempt in result.get("attempts", []) if attempt.get("outcome") in ("committed", "execution_failed")]
+    if not committed:
+        raise RuntimeError("benchmark produced no committed transactions to verify on the observer")
+    deadline = time.monotonic() + timeout
+    for attempt in committed:
+        tx_hash = attempt.get("hash", "")
+        if not re.fullmatch(r"[0-9A-Fa-f]{64}", tx_hash):
+            raise RuntimeError("benchmark committed observation has an invalid transaction hash")
+        while True:
+            try:
+                response = http_json(f"{rest_url}/cosmos/tx/v1beta1/txs/{tx_hash}")
+                tx_response = response.get("tx_response", response)
+                observed_hash = str(tx_response.get("txhash", ""))
+                observed_code = tx_response.get("code")
+                observed_height = int(str(tx_response.get("height", "0")))
+                expected_height = int(attempt.get("height", 0))
+                if (observed_hash.upper() != tx_hash.upper() or observed_code is None
+                        or int(observed_code) != int(attempt.get("code")) or observed_height <= 0
+                        or expected_height <= 0 or observed_height != expected_height):
+                    raise RuntimeError(f"observer REST history does not match committed transaction {tx_hash}")
+                break
+            except (RuntimeError, ValueError, TypeError):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"observer REST history did not catch up to committed transaction {tx_hash}")
+                time.sleep(0.2)
 
 
 def run_private(args, state, artifact):
@@ -254,13 +379,7 @@ def run_testnet(args, state, artifact):
     if rpc_url != PUBLIC_RPC or rest_url != PUBLIC_REST:
         raise RuntimeError("bootstrap endpoint change requires a reviewed network configuration update")
     artifact["validators"] = wait_ready([rpc_url], args.chain_id, args.startup_timeout)
-    if args.fee_urp1 is None:
-        minimum = http_json(rest_url + "/cosmos/base/node/v1beta1/config").get("minimum_gas_price", "")
-        match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)urp1", minimum)
-        if not match:
-            raise RuntimeError("node did not publish a native minimum gas price; specify --fee-urp1 explicitly")
-        gas = args.gas or 100000 + args.operations_per_envelope * 15000
-        args.fee_urp1 = int((Decimal(match[1]) * gas).to_integral_value(rounding=ROUND_CEILING))
+    resolve_fee(args, rest_url)
     build_clients(state / "bin")
     accounts = state / "bin" / "rp1-accounts"
     seeds = state / "accounts.json"
@@ -273,9 +392,67 @@ def run_testnet(args, state, artifact):
     run_benchmark(args, state / "bin" / "rp1-benchmark", seeds, rpc_url, rest_url, state / "result.json")
 
 
+def run_joined_testnet(args, state, artifact):
+    """Synchronize an observer home, prove restart convergence, then benchmark it."""
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64"):
+        raise RuntimeError("validator release requires a native Linux x86-64 host; use that host for this command")
+    bootstrap = http_json(BOOTSTRAP_URL)
+    if bootstrap.get("chain_id") != "chain-1" or bootstrap.get("genesis", {}).get("chain_id") != "chain-1":
+        raise RuntimeError("public bootstrap chain identity is invalid")
+    public_rpc, public_rest = bootstrap.get("rpc_url"), bootstrap.get("rest_url")
+    if public_rpc != PUBLIC_RPC or public_rest != PUBLIC_REST:
+        raise RuntimeError("bootstrap endpoint change requires a reviewed network configuration update")
+    daemon = install_release(state / "validator")
+    require_join_capability(daemon)
+    artifact["validator_archive_sha256"] = ARCHIVE_SHA256
+    build_clients(state / "bin")
+    home = state / "observer"
+    if home.exists():
+        marker = json.loads((home / "config" / "state-sync.json").read_text())
+        if marker.get("chain_id") != args.chain_id or marker.get("rpc_url") != public_rpc:
+            raise RuntimeError("existing observer belongs to another network; select a new --state-dir")
+    else:
+        listen = f"0.0.0.0:{args.join_consensus_port}"
+        subprocess.run(join_command(daemon, home, BOOTSTRAP_URL, listen), check=True)
+    enable_observer_api(home, f"127.0.0.1:{args.join_rest_port}")
+    local_rpc = f"http://127.0.0.1:{args.join_rpc_port}"
+    local_rest = f"http://127.0.0.1:{args.join_rest_port}"
+    artifact["active_workload_rpc"] = public_rpc
+    artifact["active_workload_rest"] = public_rest
+    artifact["observer_rpc"] = local_rpc
+    artifact["observer_rest"] = local_rest
+    start = [str(daemon), "start", "--home", str(home),
+             "--rpc.laddr", f"tcp://127.0.0.1:{args.join_rpc_port}",
+             "--grpc.address", f"127.0.0.1:{args.join_grpc_port}"]
+    log = state / "observer.log"
+    with ChildProcess(start, log) as child:
+        first = wait_join_ready([public_rpc, local_rpc], args.chain_id, args.startup_timeout, child)
+        first_height = int(first[1]["header"]["header"]["height"])
+    with ChildProcess(start, log) as child:
+        second = wait_join_ready([public_rpc, local_rpc], args.chain_id, args.startup_timeout, child)
+        deadline = time.monotonic() + args.startup_timeout
+        while int(rpc(local_rpc, "status")["sync_info"]["latest_block_height"]) <= first_height:
+            child.check()
+            if time.monotonic() >= deadline:
+                raise RuntimeError("joined observer did not make progress after restart")
+            time.sleep(0.2)
+        artifact["validators"] = second
+        resolve_fee(args, public_rest)
+        accounts = state / "bin" / "rp1-accounts"
+        seeds = state / "accounts.json"
+        if not seeds.exists():
+            subprocess.run([str(accounts), "create", "--chain-id", args.chain_id, "--count", str(args.concurrency), "--output", str(seeds)], check=True)
+        funding_timeout = max(args.startup_timeout, args.concurrency * 30)
+        subprocess.run([str(accounts), "fund", "--seed-accounts-file", str(seeds), "--rpc", public_rpc,
+                        "--rest", public_rest, "--faucet-url", FAUCET_URL, "--output", str(state / "funding.json"),
+                        "--timeout", str(funding_timeout) + "s"], check=True)
+        run_benchmark(args, state / "bin" / "rp1-benchmark", seeds, public_rpc, public_rest, state / "result.json")
+        verify_observer_replication(local_rest, state / "result.json", args.startup_timeout)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("private", "testnet"))
+    parser.add_argument("mode", choices=("private", "testnet", "joined-testnet"))
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--validators", type=int, default=4, help="private network validators (1..32)")
     parser.add_argument("--concurrency", type=int, default=20)
@@ -285,8 +462,15 @@ def main():
     parser.add_argument("--fee-urp1", type=int, help="default: zero privately; node minimum on shared testnet")
     parser.add_argument("--gas", type=int, default=0)
     parser.add_argument("--startup-timeout", type=float, default=180)
+    parser.add_argument("--join-consensus-port", type=int, default=27656)
+    parser.add_argument("--join-rpc-port", type=int, default=26657)
+    parser.add_argument("--join-rest-port", type=int, default=1317)
+    parser.add_argument("--join-grpc-port", type=int, default=9090)
     args = parser.parse_args()
-    if not 1 <= args.validators <= 32 or not 1 <= args.concurrency <= 4096 or not 1 <= args.operations_per_envelope <= 100000 or args.startup_timeout <= 0 or args.gas < 0 or (args.fee_urp1 is not None and args.fee_urp1 < 0):
+    join_ports = (args.join_consensus_port, args.join_rpc_port, args.join_rest_port, args.join_grpc_port)
+    if (not 1 <= args.validators <= 32 or not 1 <= args.concurrency <= 4096 or not 1 <= args.operations_per_envelope <= 100000
+            or args.startup_timeout <= 0 or args.gas < 0 or any(not 1 <= port <= 65535 for port in join_ports)
+            or len(set(join_ports)) != len(join_ports) or (args.fee_urp1 is not None and args.fee_urp1 < 0)):
         parser.error("invalid validator count, concurrency, batch size, timeout, gas, or fee")
     args.chain_id = "rp1-benchmark-1" if args.mode == "private" else "chain-1"
     if args.mode == "private" and args.fee_urp1 is None:
@@ -294,7 +478,9 @@ def main():
     state = (args.state_dir or ROOT / ".rp1-benchmark" / args.mode).absolute()
     config = {"mode": args.mode, "chain_id": args.chain_id,
               "validators": args.validators if args.mode == "private" else None,
-              "accounts": args.concurrency, "validator_version": VERSION if args.mode == "private" else None}
+              "accounts": args.concurrency, "validator_version": VERSION if args.mode != "testnet" else None}
+    if args.mode == "joined-testnet":
+        config["observer_ports"] = list(join_ports)
     os.umask(0o077)
     artifact = {"configuration": config, "platform": platform.platform(), "cpu_count": os.cpu_count(),
                 "started_at": datetime.now(timezone.utc).isoformat(), "complete": False}
@@ -303,6 +489,8 @@ def main():
             try:
                 if args.mode == "private":
                     run_private(args, state, artifact)
+                elif args.mode == "joined-testnet":
+                    run_joined_testnet(args, state, artifact)
                 else:
                     run_testnet(args, state, artifact)
                 artifact["complete"] = True

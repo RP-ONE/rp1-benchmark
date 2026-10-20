@@ -114,6 +114,67 @@ class SetupChecks(unittest.TestCase):
                 self.fail("changed topology reused funded homes")
         self.assertEqual(wallet.read_text(), "local-secret")
 
+    def test_joined_testnet_refuses_daemon_without_state_sync(self):
+        with self.assertRaisesRegex(RuntimeError, "state-sync-capable"):
+            benchmark.require_join_capability(Path("/tmp/rp1d"), "rp1d testnet join help")
+
+    def test_joined_fee_comes_from_active_node_metadata(self):
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                body = b'{"minimum_gas_price":"0.000001urp1"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        args = type("Args", (), {"fee_urp1": None, "gas": 0, "operations_per_envelope": 100})()
+        benchmark.resolve_fee(args, f"http://127.0.0.1:{server.server_port}")
+        self.assertEqual(args.fee_urp1, 2)
+
+    def test_joined_observer_preserves_home_and_verifies_rest_replication(self):
+        home = self.root / "observer"
+        (home / "config").mkdir(parents=True)
+        (home / "config" / "app.toml").write_text(
+            'minimum-gas-prices = "0urp1"\n\n[api]\nenable = false\naddress = "tcp://127.0.0.1:1317"\n'
+        )
+        (home / "config" / "state-sync.json").write_text("preserved")
+        benchmark.enable_observer_api(home, "127.0.0.1:1317")
+        self.assertEqual((home / "config" / "state-sync.json").read_text(), "preserved")
+        app_config = (home / "config" / "app.toml").read_text()
+        self.assertIn("enable = true", app_config)
+        self.assertIn('address = "tcp://127.0.0.1:1317"', app_config)
+
+        tx_hash = "A" * 64
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({"tx_response": {"txhash": tx_hash, "code": 0, "height": "9"}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        result = self.root / "result.json"
+        result.write_text(json.dumps({"attempts": [{"hash": tx_hash, "signed_tx_base64": "c2lnbmVk", "outcome": "committed", "code": 0, "height": 9}]}))
+        benchmark.verify_observer_replication(f"http://127.0.0.1:{server.server_port}", result)
+
 
 if __name__ == "__main__":
     unittest.main()

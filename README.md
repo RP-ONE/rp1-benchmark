@@ -52,7 +52,17 @@ python3 scripts/benchmark.py testnet
 
 This discovers the official RPC/REST endpoints from the [public bootstrap manifest](https://testnet.chain.rp.one/bootstrap.json), checks network readiness, creates fresh local accounts, requests tokens from the hosted faucet, and confirms actual native balances before starting the benchmark. Existing funded accounts are reused. Faucet failures, rate limits, and uncertain responses stop the run without automatic claim retries. Funding audits contain addresses and outcomes, never mnemonics. The default fee is calculated from the node's published minimum gas price; `--fee-urp1` selects an explicit amount.
 
-**This command benchmarks existing active testnet validators; it does not attach a new local validator to the running chain.** The current `rp1d testnet join` command configures a candidate observer and admission transactions, but does not synchronize existing application state. A supported state-sync path is needed before fresh-validator joining can be automated reliably. On 15 October 2026 the bootstrap was reachable, RPC/REST returned HTTP 503, and the faucet returned HTTP 403. The command reports those service failures before claiming readiness or sending benchmark traffic.
+**This command benchmarks existing active testnet validators; it does not attach a new local validator to the running chain.** The pinned 0.22.0 `rp1d testnet join` command only configures a candidate observer and cannot synchronize existing application state. The separate `joined-testnet` mode below uses the newer state-sync join path when its approved daemon release is available. Public RPC/REST and fresh-account faucet funding were verified on 20 October 2026. Service failures stop setup before benchmark traffic starts.
+
+## Joined testnet observer
+
+After a state-sync-capable validator release is published, a fresh observer can be synchronized and benchmarked with:
+
+```sh
+python3 scripts/benchmark.py joined-testnet
+```
+
+This mode downloads and verifies the official validator release, refuses releases that do not expose `testnet join --state-sync`, creates a fresh private observer home, and joins from the HTTPS public bootstrap manifest. It waits for the observer and public RPC to agree on block hash, application hash, and block time at a common retained height, stops and restarts the observer, and requires continued height progress before requesting fresh accounts from the faucet. Signed benchmark traffic is sent through the active public RPC/REST endpoints because an observer is read-only; each committed hash is then checked through the observer's REST history. The observer remains a non-voting node; no validator admission transaction or shared private key is used. The current pinned 0.22.0 release does not provide this capability, so the command fails clearly until the approved release pin is updated.
 
 For existing validator operators, the [validator join guide](https://docs.rp.one/operate/join-validator/) documents the bootstrap and admission commands. Running an isolated private network and participating in the shared chain are separate configurations: a private run has its own genesis, funded accounts, and validators.
 
