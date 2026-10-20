@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -318,6 +319,71 @@ func TestRunFiniteEnvelopeHonorsAdmissionWindow(t *testing.T) {
 	}
 	if got := submitted.Load(); got != 0 {
 		t.Fatalf("finite workload broadcast %d envelopes after deadline", got)
+	}
+}
+
+func TestRPCClientReusesConnectionsForConcurrentPolling(t *testing.T) {
+	const workers = 16
+	var connections atomic.Int32
+	var gateMu sync.Mutex
+	var gate chan struct{}
+	started := make(chan struct{}, workers)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gateMu.Lock()
+		current := gate
+		gateMu.Unlock()
+		started <- struct{}{}
+		select {
+		case <-current:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"ok":true}}`))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+	rpc := newRPCClient(server.URL, workers)
+	defer rpc.http.CloseIdleConnections()
+	for wave := 0; wave < 4; wave++ {
+		gateMu.Lock()
+		gate = make(chan struct{})
+		current := gate
+		gateMu.Unlock()
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				var result struct {
+					OK bool `json:"ok"`
+				}
+				if err := rpc.call(ctx, "status", map[string]any{}, &result); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		for i := 0; i < workers; i++ {
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				close(current)
+				wg.Wait()
+				t.Fatal("concurrent polling requests did not reach the server")
+			}
+		}
+		close(current)
+		wg.Wait()
+	}
+	if got := connections.Load(); got > workers {
+		t.Fatalf("polling waves opened %d connections for %d workers; expected idle reuse", got, workers)
 	}
 }
 

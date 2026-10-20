@@ -164,7 +164,8 @@ func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output 
 	if seeds.ChainID != chainID || len(seeds.Accounts) < concurrency {
 		return fmt.Errorf("seed file chain_id must equal %q and contain at least %d accounts", chainID, concurrency)
 	}
-	rpc := &rpcClient{endpoint: strings.TrimRight(rpcURL, "/"), http: &http.Client{Timeout: 15 * time.Second}}
+	rpc := newRPCClient(rpcURL, concurrency)
+	defer rpc.http.CloseIdleConnections()
 	var status struct {
 		NodeInfo struct {
 			Network string `json:"network"`
@@ -419,6 +420,14 @@ func buildTx(ctx client.Context, from account, all []account, sequence uint64, d
 	return raw, strings.ToUpper(hex.EncodeToString(h[:])), nil
 }
 
+func newRPCClient(endpoint string, concurrency int) *rpcClient {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = concurrency
+	transport.MaxIdleConns = concurrency
+	transport.MaxConnsPerHost = concurrency
+	return &rpcClient{endpoint: strings.TrimRight(endpoint, "/"), http: &http.Client{Timeout: 15 * time.Second, Transport: transport}}
+}
+
 func (r *rpcClient) broadcast(ctx context.Context, raw []byte) error {
 	var v struct {
 		Code uint32 `json:"code"`
@@ -484,11 +493,18 @@ func (r *rpcClient) call(ctx context.Context, method string, params any, out any
 		return err
 	}
 	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
+	if err != nil {
+		return err
+	}
+	if len(responseBody) > 8<<20 {
+		return errors.New("RPC response exceeds 8 MiB limit")
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("rpc HTTP %s", resp.Status)
 	}
 	var envelope rpcResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&envelope); err != nil {
+	if err := json.Unmarshal(responseBody, &envelope); err != nil {
 		return err
 	}
 	if envelope.Error != nil {
