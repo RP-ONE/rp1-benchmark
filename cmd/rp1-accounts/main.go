@@ -402,13 +402,14 @@ func claimAndWait(ctx context.Context, cfg fundConfig, address string) error {
 	}
 	var claim struct {
 		Success bool   `json:"success"`
+		Pending bool   `json:"pending"`
 		TxHash  string `json:"tx_hash"`
 		Error   string `json:"error"`
 	}
 	if err := json.Unmarshal(response, &claim); err != nil {
 		return err
 	}
-	if !claim.Success || claim.TxHash == "" {
+	if (!claim.Success && !claim.Pending) || claim.TxHash == "" {
 		if claim.Error == "" {
 			claim.Error = "faucet rejected claim"
 		}
@@ -439,7 +440,9 @@ func newFundingHTTPClient() *http.Client {
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	return &http.Client{
-		Timeout: 15 * time.Second,
+		// Faucet confirmation can take 60 seconds; allow signing/network headroom.
+		// The caller context still bounds the complete funding workflow.
+		Timeout: 75 * time.Second,
 		Transport: &http.Transport{
 			Proxy:               http.ProxyFromEnvironment,
 			Protocols:           protocols,

@@ -50,7 +50,7 @@ python3 scripts/benchmark.py private \
 python3 scripts/benchmark.py testnet
 ```
 
-This discovers the official RPC/REST endpoints from the [public bootstrap manifest](https://testnet.chain.rp.one/bootstrap.json), checks network readiness, creates fresh local accounts, requests tokens from the hosted faucet, and confirms actual native balances before starting the benchmark. Existing funded accounts are reused. Faucet failures, rate limits, and uncertain responses stop the run without automatic claim retries. Funding audits contain addresses and outcomes, never mnemonics. The default fee is calculated from the node's published minimum gas price; `--fee-urp1` selects an explicit amount.
+This discovers the official RPC/REST endpoints from the [public bootstrap manifest](https://testnet.chain.rp.one/bootstrap.json), checks network readiness, creates fresh local accounts, requests tokens from the hosted faucet, and confirms actual native balances before starting the benchmark. Existing funded accounts are reused. Faucet failures and rate limits stop the run without automatic claim retries. Submitted claims, including pending responses, must reach the required on-chain balance before setup continues. Funding audits contain addresses and outcomes, never mnemonics. The default fee is calculated from the node's published minimum gas price; `--fee-urp1` selects an explicit amount.
 
 This command benchmarks existing active testnet validators. To synchronize a fresh local observer with the running chain first, use `joined-testnet` below. Public RPC/REST and fresh-account faucet funding were verified on 20 October 2026. Service failures stop setup before benchmark traffic starts.
 
