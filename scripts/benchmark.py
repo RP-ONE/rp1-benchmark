@@ -370,6 +370,10 @@ def run_private(args, state, artifact):
         seeds = base / "seed-accounts" / "accounts.json"
         print("Private network ready. Fresh benchmark accounts are funded in genesis.", flush=True)
         run_benchmark(args, state / "bin" / "rp1-benchmark", seeds, endpoints[0], rest_url, state / "result.json")
+        # Re-prove the complete validator set after load. A successful client
+        # result alone does not establish that every validator retained the
+        # same terminal block header.
+        artifact["terminal_validators"] = wait_ready(endpoints, args.chain_id, args.startup_timeout, child)
 
 
 def run_testnet(args, state, artifact):
