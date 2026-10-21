@@ -14,11 +14,11 @@ python3 scripts/benchmark.py private
 
 That command:
 
-1. Downloads `rp1d` **0.25.6** and the public licence, notices, provenance, checksums, and signature bundle.
+1. Downloads `rp1d` **0.25.7** and the public licence, notices, provenance, checksums, and signature bundle.
 2. Checks the pinned signed-manifest digest, all asset checksums, archive layout, and provenance before making the binary executable.
 3. Builds the benchmark client and starts **four validators**, using 20 ms batching and 50 ms consensus rounds.
 4. Generates **20 fresh accounts funded in genesis**. Keys stay in a private local directory; no shared funded wallet or faucet key is published.
-5. Waits for distinct validator identities, running consensus, positive heights, and matching retained block height/hash/app hash/time.
+5. Waits for distinct validator identities, running consensus, and matching retained block height/hash/app hash/time, then requires a new committed block before sending traffic. A restored block alone cannot establish restart readiness.
 6. Runs a 20-second benchmark with 20 concurrent envelopes, 100 operations per envelope, and 5 ms transaction polling, then stops the validators.
 
 The local network uses `0urp1` minimum gas prices and the default run pays zero fees. This selected configuration is recorded evidence for that run, not a public-network fee policy. Containers publish no host ports and mount only this public checkout (read-only) and the selected private state directory. REST/gRPC/EVM listeners bind to loopback. The published daemon's managed setup requires wildcard RPC listeners; use a private host/network or firewall those ports. The client connects through loopback.
@@ -106,7 +106,7 @@ The client signs standard Cosmos `bank.MsgMultiSend` transactions with `SIGN_MOD
 
 ## Run the client separately
 
-Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.25.6) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
+Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.25.7) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
 
 Create a seed file with funded accounts. Keep it outside the repository and mode `0600`:
 

@@ -1,4 +1,4 @@
-"""Setup failure cases: wrong chain, divergent heads, exited children,
+"""Setup failure cases: wrong chain, divergent or stalled heads, exited children,
 concurrent reuse, changed topology, and cancellation must prevent a run.
 """
 import json
@@ -150,6 +150,20 @@ class SetupChecks(unittest.TestCase):
         self.second.identity = self.first.identity
         with self.assertRaisesRegex(RuntimeError, "duplicate"):
             benchmark.wait_ready([self.first.url, self.second.url], "fixture-1", timeout=0.1)
+
+    def test_restored_matching_heads_do_not_establish_startup_progress(self):
+        with self.assertRaisesRegex(RuntimeError, "progress"):
+            benchmark.wait_ready([self.first.url, self.second.url], "fixture-1",
+                                 timeout=0.15, require_progress=True)
+
+    def test_startup_waits_for_a_new_matching_head(self):
+        def advance(_):
+            self.first.height = self.second.height = 10
+
+        with mock.patch.object(benchmark.time, "sleep", side_effect=advance):
+            evidence = benchmark.wait_ready([self.first.url, self.second.url], "fixture-1",
+                                            timeout=1, require_progress=True)
+        self.assertEqual([node["header"]["header"]["height"] for node in evidence], ["10", "10"])
 
     def test_exited_daemon_does_not_wait_for_network_timeout(self):
         with benchmark.ChildProcess([sys.executable, "-c", "raise SystemExit(7)"], self.root / "daemon.log") as process:

@@ -19,10 +19,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-VERSION = "0.25.6"
+VERSION = "0.25.7"
 ARCHIVE_NAME = "rp1d_linux_amd64.tar.gz"
-ARCHIVE_SHA256 = "cb92288a965b5b7be2c3ebcb422728b2dabdae37dc5e59d47f14560eaeba8f70"
-RELEASE_MANIFEST_SHA256 = "e1b3543f9309e847ff91cf5fbe71980fbf02031cebd168d040c47843b91275b2"
+ARCHIVE_SHA256 = "f15ccde33bef023a03d073deead393b412eaa3b325f6cca726a78b70cfec1f5b"
+RELEASE_MANIFEST_SHA256 = "9ef4ff20eb6a5b8b3b983b9d064e8b0fffdffdef2bcb70eabf3b6902117f531b"
 RELEASE_BASE_URL = f"https://github.com/RP-ONE/rp1-releases/releases/download/{VERSION}"
 ASSET_DIRNAME = "release-assets"
 _ASSET_NAMES = ("LICENSE.txt", "PROVENANCE.json", "THIRD_PARTY_NOTICES.txt", ARCHIVE_NAME, "SHA256SUMS", "SHA256SUMS.bundle")
