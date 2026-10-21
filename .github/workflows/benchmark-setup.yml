@@ -44,6 +44,9 @@ jobs:
               assert not result.get('run_error') and result['workers_stopped']
               assert result['successful_envelopes'] >= 20
               assert result['signed_envelopes'] == result['successful_envelopes']
+          initial = json.loads((root / 'initial-setup.json').read_text())
+          previous_height = int(initial['terminal_validators'][0]['header']['header']['height'])
+          assert all(int(node['header']['header']['height']) > previous_height for node in setup['validators'])
           PY
       - name: Exact 6,137-output workload on a fresh private network
         run: |

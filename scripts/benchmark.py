@@ -153,8 +153,9 @@ def capture_node(endpoint, chain_id, peers):
     return {"rpc": endpoint, "node_id": identity.lower(), "header": head}
 
 
-def wait_ready(endpoints, chain_id, timeout, child=None):
+def wait_ready(endpoints, chain_id, timeout, child=None, *, require_progress=False):
     deadline, last_error = time.monotonic() + timeout, "waiting for convergence"
+    initial_height = None
     with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
         while time.monotonic() < deadline:
             if child:
@@ -166,8 +167,14 @@ def wait_ready(endpoints, chain_id, timeout, child=None):
                     raise RuntimeError("duplicate validator node identity")
                 reference = nodes[0]["header"]
                 if all(node["header"] == reference for node in nodes):
-                    return nodes
-                last_error = "waiting for validator headers to converge at one height/hash/app-hash/time"
+                    height = int(reference["header"]["height"])
+                    if not require_progress or (initial_height is not None and height > initial_height):
+                        return nodes
+                    if initial_height is None:
+                        initial_height = height
+                    last_error = "waiting for new committed progress beyond the initial matching head"
+                else:
+                    last_error = "waiting for validator headers to converge at one height/hash/app-hash/time"
             except (RuntimeError, KeyError, TypeError, ValueError) as error:
                 last_error = str(error)
             time.sleep(min(0.2, max(0, deadline - time.monotonic())))
@@ -365,7 +372,10 @@ def run_private(args, state, artifact):
             raise RuntimeError("managed topology does not match the requested validator network")
         endpoints = [local_endpoint(node["RPCLaddr"]) for node in nodes]
         rest_url = local_endpoint(nodes[0]["APIAddress"])
-        artifact["validators"] = wait_ready(endpoints, args.chain_id, max(0.1, deadline - time.monotonic()), child)
+        artifact["validators"] = wait_ready(
+            endpoints, args.chain_id, max(0.1, deadline - time.monotonic()), child,
+            require_progress=True,
+        )
         artifact["validator_archive_sha256"] = ARCHIVE_SHA256
         seeds = base / "seed-accounts" / "accounts.json"
         print("Private network ready. Fresh benchmark accounts are funded in genesis.", flush=True)

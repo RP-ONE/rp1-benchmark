@@ -18,7 +18,7 @@ That command:
 2. Checks the pinned signed-manifest digest, all asset checksums, archive layout, and provenance before making the binary executable.
 3. Builds the benchmark client and starts **four validators**, using 20 ms batching and 50 ms consensus rounds.
 4. Generates **20 fresh accounts funded in genesis**. Keys stay in a private local directory; no shared funded wallet or faucet key is published.
-5. Waits for distinct validator identities, running consensus, positive heights, and matching retained block height/hash/app hash/time.
+5. Waits for distinct validator identities, running consensus, and matching retained block height/hash/app hash/time, then requires a new committed block before sending traffic. A restored block alone cannot establish restart readiness.
 6. Runs a 20-second benchmark with 20 concurrent envelopes, 100 operations per envelope, and 5 ms transaction polling, then stops the validators.
 
 The local network uses `0urp1` minimum gas prices and the default run pays zero fees. This selected configuration is recorded evidence for that run, not a public-network fee policy. Containers publish no host ports and mount only this public checkout (read-only) and the selected private state directory. REST/gRPC/EVM listeners bind to loopback. The published daemon's managed setup requires wildcard RPC listeners; use a private host/network or firewall those ports. The client connects through loopback.
