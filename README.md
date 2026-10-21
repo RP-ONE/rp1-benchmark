@@ -4,7 +4,7 @@ Run signed, batched RP1 benchmarks with an automatically provisioned private val
 
 ## Private benchmark: one command
 
-Use a **native Linux x86-64 host**, Python **3.10+**, Go **1.24+**, and Git. For a four-validator evaluation, provision a host with at least 8 CPU cores, 16 GiB RAM, SSD storage, and 20 GiB free disk. This is a starting configuration, not a performance guarantee. For capacity measurements, place the load generator on a separate host using the manual client command below. macOS/ARM can run the client against an existing network; the published validator is Linux x86-64 only.
+Use Python **3.10+** and Git. On macOS/ARM, run a local Docker-compatible engine with Linux x86-64 translation; the command below automatically runs the public setup inside a local container, including Go. On native Linux x86-64, install Go **1.24+**. For a four-validator evaluation, provision a host with at least 8 CPU cores, 16 GiB RAM, SSD storage, and 20 GiB free disk. This is a starting configuration, not a performance guarantee. For capacity measurements, place the load generator on a separate host using the manual client command below. The published validator is Linux x86-64. Apple Silicon runs it through local instruction translation, which is suitable for customer setup and integration checks; measure native capacity on dedicated Linux x86-64 hardware. Allocate at least 8 CPUs and 16 GiB RAM to the local engine for a four-validator evaluation. No server login or private repository is needed.
 
 ```sh
 git clone https://github.com/RP-ONE/rp1-benchmark.git
@@ -14,14 +14,14 @@ python3 scripts/benchmark.py private
 
 That command:
 
-1. Downloads `rp1d` **0.25.4** and the public licence, notices, provenance, checksums, and signature bundle.
+1. Downloads `rp1d` **0.25.6** and the public licence, notices, provenance, checksums, and signature bundle.
 2. Checks the pinned signed-manifest digest, all asset checksums, archive layout, and provenance before making the binary executable.
 3. Builds the benchmark client and starts **four validators**, using 20 ms batching and 50 ms consensus rounds.
 4. Generates **20 fresh accounts funded in genesis**. Keys stay in a private local directory; no shared funded wallet or faucet key is published.
 5. Waits for distinct validator identities, running consensus, positive heights, and matching retained block height/hash/app hash/time.
 6. Runs a 20-second benchmark with 20 concurrent envelopes, 100 operations per envelope, and 5 ms transaction polling, then stops the validators.
 
-The local network uses `0urp1` minimum gas prices and the default run pays zero fees. This selected configuration is recorded evidence for that run, not a public-network fee policy. REST/gRPC/EVM listeners bind to loopback. The published daemon's managed setup requires wildcard RPC listeners; use a private host/network or firewall those ports. The client connects through loopback.
+The local network uses `0urp1` minimum gas prices and the default run pays zero fees. This selected configuration is recorded evidence for that run, not a public-network fee policy. Containers publish no host ports and mount only this public checkout (read-only) and the selected private state directory. REST/gRPC/EVM listeners bind to loopback. The published daemon's managed setup requires wildcard RPC listeners; use a private host/network or firewall those ports. The client connects through loopback.
 
 Outputs are in `.rp1-benchmark/private/`:
 
@@ -33,7 +33,7 @@ Outputs are in `.rp1-benchmark/private/`:
 | `network/rp1-benchmark-1/seed-accounts/accounts.json` | Locally generated test keys; keep private |
 | `validator/release-assets/` | Verified distribution assets, licence, and notices |
 
-Repeat the same command to reuse the persisted chain and accounts. A concurrent run is refused. Changing the validator/account count requires a new state directory, preserving the previous network:
+Repeat the same command to reuse the persisted chain and accounts. A concurrent run is refused. Changing the validator/account count or validator release version requires a new state directory, preserving the previous network:
 
 ```sh
 python3 scripts/benchmark.py private \
@@ -42,7 +42,19 @@ python3 scripts/benchmark.py private \
   --operations-per-envelope 1000 --duration 60s
 ```
 
-`Ctrl-C` stops the benchmark and validator process group. State is retained for inspection and restart. Setup failures exit nonzero and write a partial `setup.json`; transaction failures retain a partial `result.json`. A downloaded asset that fails verification is never executed. The installer pins the checksum manifest whose Sigstore signature was independently verified; the complete bundle is retained for independent verification using the [release verification instructions](https://github.com/RP-ONE/rp1-releases#install-and-verify).
+`Ctrl-C` stops the benchmark and validator process group. State is retained for inspection and restart. Runtime preflight failures print a direct error; setup failures after the session starts exit nonzero and write a partial `setup.json`; transaction failures retain a partial `result.json`. A downloaded asset that fails verification is never executed. The installer pins the checksum manifest whose Sigstore signature was independently verified; the complete bundle is retained for independent verification using the [release verification instructions](https://github.com/RP-ONE/rp1-releases#install-and-verify).
+
+## 6,137-operation batch profile
+
+```sh
+python3 scripts/benchmark.py private --profile legacy-6137
+```
+
+This profile stores its state and evidence in `.rp1-benchmark/legacy-6137/`, so it can run after the quickstart without replacing that network or its funded accounts.
+
+This starts four local validators and sends **exactly 100 signed envelopes with 6,137 outputs each**, totaling **613,700 operations**, with up to 100 envelopes in flight. It generates 100 funded local accounts. Within each envelope, every output is a distinct one-`urp1` transfer to that worker's next funded peer account, matching the historical ring workload shape without aggregating outputs. The admission deadline is 120 seconds; reaching it before the requested work completes fails the run and retains partial evidence. The legacy profile allows 120 seconds per transaction for committed observation and polls every 50 ms. At most eight receipt downloads run simultaneously while all 100 envelopes may remain in flight. The reported latency includes that observation time; a longer timeout does not establish a finality target. Use `--poll 5ms` when you explicitly need the normal client cadence, or `--finality-timeout 180s` for a longer observation window. Adjust `--concurrency` or `--duration` for the machine while retaining the exact output and envelope counts. For example, `--concurrency 20 --duration 180s` sends the same total work with fewer envelopes in flight.
+
+The profile reproduces the documented envelope/output counts. Original hardware, pacing and indexed database-second buckets are not retained in this repository, so it cannot certify the historical peak. Its reported rate is the measured whole workflow including drain. Inspect finality P50/P95/P99 and require at least 20 committed observations. Keep the hardware, runtime/translation, concurrency and polling cadence with the result; `setup.json` records container host details when applicable.
 
 ## Shared testnet
 
@@ -62,7 +74,7 @@ Synchronize a fresh observer and run the shared-chain benchmark with:
 python3 scripts/benchmark.py joined-testnet
 ```
 
-This mode downloads and verifies the official validator release, refuses releases that do not expose `testnet join --state-sync`, creates a fresh private observer home, and joins from the HTTPS public bootstrap manifest. It waits for the observer and public RPC to agree on block hash, application hash, and block time at a common retained height, stops and restarts the observer, and requires continued height progress before requesting fresh accounts from the faucet. Signed benchmark traffic is sent through the active public RPC/REST endpoints because an observer is read-only; each committed hash is then checked through the observer's REST history. The observer remains a non-voting node; no validator admission transaction or shared private key is used.
+On macOS/ARM this command uses the same local container path as `private`. This mode downloads and verifies the official validator release, refuses releases that do not expose `testnet join --state-sync`, creates a fresh private observer home, and joins from the HTTPS public bootstrap manifest. It waits for the observer and public RPC to agree on block hash, application hash, and block time at a common retained height, stops and restarts the observer, and requires continued height progress before requesting fresh accounts from the faucet. Signed benchmark traffic is sent through the active public RPC/REST endpoints because an observer is read-only; each committed hash is then checked through the observer's REST history. The observer remains a non-voting node; no validator admission transaction or shared private key is used.
 
 For existing validator operators, the [validator join guide](https://docs.rp.one/operate/join-validator/) documents the bootstrap and admission commands. Running an isolated private network and participating in the shared chain are separate configurations: a private run has its own genesis, funded accounts, and validators.
 
@@ -90,11 +102,11 @@ The client signs standard Cosmos `bank.MsgMultiSend` transactions with `SIGN_MOD
 * `signed_envelopes_per_second` counts signed transactions.
 * `operations_per_second` counts successful `MsgMultiSend` outputs (`operations_per_envelope` times committed envelopes).
 
-The workload keeps one envelope in flight per worker. Increase `--concurrency` for a multi-in-flight run; a one-in-flight run is useful for end-to-end latency and workflow rate, but does not establish saturation capacity.
+`--envelopes N` selects an exact finite workload; zero (the default) submits for the configured duration. The duration bounds admission in both cases; a finite run that cannot complete every requested envelope fails. The workload keeps one envelope in flight per worker. `--poll` controls the committed-transaction query cadence (5 ms for the normal client, 50 ms for `legacy-6137` unless explicitly overridden), while `--finality-timeout` bounds the wait for each transaction and defaults to 30 seconds (120 seconds for `legacy-6137`). Receipt downloads are limited to eight concurrent requests. Increase `--concurrency` for a multi-in-flight run; a one-in-flight run is useful for end-to-end latency and workflow rate, but does not establish saturation capacity.
 
 ## Run the client separately
 
-Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.25.4) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
+Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.25.6) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
 
 Create a seed file with funded accounts. Keep it outside the repository and mode `0600`:
 
@@ -123,8 +135,10 @@ go run ./cmd/rp1-benchmark \
   --duration 20s \
   --concurrency 20 \
   --operations-per-envelope 100 \
+  --envelopes 0 \
   --gas 1600000 \
   --fee-urp1 10 \
+  --finality-timeout 30s \
   --poll 5ms \
   --output result.json
 ```

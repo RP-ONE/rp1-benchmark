@@ -7,12 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,143 +32,191 @@ func TestMain(m *testing.M) {
 }
 
 func TestRunFixtureBindsSignedMultisendAndPersistsResult(t *testing.T) {
-	seeds := fixtureSeeds(t, 2)
-	var mu sync.Mutex
-	var submitted []string
-	sequences := map[string]uint64{}
-	byHash := map[string][]byte{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/cosmos/auth/") {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"account":{"account_number":"1","sequence":"0"}}`))
-			return
-		}
-		var req struct {
-			Method string `json:"method"`
-			Params struct {
-				Tx   string `json:"tx"`
-				Hash string `json:"hash"`
-			} `json:"params"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		w.Header().Set("Content-Type", "application/json")
-		mu.Lock()
-		defer mu.Unlock()
-		switch req.Method {
-		case "status":
-			_, _ = w.Write([]byte(`{"result":{"node_info":{"network":"fixture-1"},"consensus_running":true,"sync_info":{"catching_up":false}}}`))
-		case "broadcast_tx_sync":
-			submitted = append(submitted, req.Params.Tx)
-			raw, _ := base64.StdEncoding.DecodeString(req.Params.Tx)
-			var wire txtypes.TxRaw
-			var body txtypes.TxBody
-			var auth txtypes.AuthInfo
-			if err := wire.Unmarshal(raw); err != nil {
-				t.Error(err)
-				w.WriteHeader(400)
-				return
+	for _, workload := range []struct {
+		name           string
+		ops, envelopes int
+		duration       time.Duration
+		workers        int
+		pressure       bool
+	}{
+		{"duration", 2, 0, 20 * time.Millisecond, 2, false},
+		{"finite_6137", 6137, 3, 2 * time.Second, 2, false},
+		{"receipt_pressure", 2, 32, 5 * time.Second, 32, true},
+	} {
+		t.Run(workload.name, func(t *testing.T) {
+			seeds := fixtureSeeds(t, workload.workers)
+			var mu sync.Mutex
+			var activeTx, maxActiveTx atomic.Int32
+			var submitted []string
+			sequences := map[string]uint64{}
+			nextPeer := make(map[string]string, len(seeds))
+			for i, seed := range seeds {
+				nextPeer[seed.Address] = seeds[(i+1)%len(seeds)].Address
 			}
-			if err := body.Unmarshal(wire.BodyBytes); err != nil {
-				t.Error(err)
-				w.WriteHeader(400)
-				return
-			}
-			if err := auth.Unmarshal(wire.AuthInfoBytes); err != nil {
-				t.Error(err)
-				w.WriteHeader(400)
-				return
-			}
-			if len(body.Messages) != 1 || body.Messages[0].TypeUrl != "/cosmos.bank.v1beta1.MsgMultiSend" || len(auth.SignerInfos) != 1 || len(wire.Signatures) != 1 {
-				t.Error("expected one signed bank multisend")
-				w.WriteHeader(400)
-				return
-			}
-			var msg banktypes.MsgMultiSend
-			if err := msg.Unmarshal(body.Messages[0].Value); err != nil {
-				t.Error(err)
-				w.WriteHeader(400)
-				return
-			}
-			if len(msg.Inputs) != 1 || len(msg.Outputs) != 2 || msg.Inputs[0].Coins.AmountOf("urp1").Int64() != 2 || auth.Fee.Amount.AmountOf("urp1").Int64() != 2 {
-				t.Error("incorrect batch output or fee accounting")
-				w.WriteHeader(400)
-				return
-			}
-			for _, out := range msg.Outputs {
-				if out.Coins.AmountOf("urp1").Int64() != 1 {
-					t.Error("output must transfer one urp1")
-					w.WriteHeader(400)
+			byHash := map[string][]byte{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/cosmos/auth/") {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"account":{"account_number":"1","sequence":"0"}}`))
 					return
 				}
+				var req struct {
+					Method string `json:"method"`
+					Params struct {
+						Tx   string `json:"tx"`
+						Hash string `json:"hash"`
+					} `json:"params"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				w.Header().Set("Content-Type", "application/json")
+				if workload.pressure && req.Method == "tx" {
+					active := activeTx.Add(1)
+					for {
+						max := maxActiveTx.Load()
+						if active <= max || maxActiveTx.CompareAndSwap(max, active) {
+							break
+						}
+					}
+					defer activeTx.Add(-1)
+					time.Sleep(10 * time.Millisecond)
+					if active > 8 {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				switch req.Method {
+				case "status":
+					_, _ = w.Write([]byte(`{"result":{"node_info":{"network":"fixture-1"},"consensus_running":true,"sync_info":{"catching_up":false}}}`))
+				case "broadcast_tx_sync":
+					submitted = append(submitted, req.Params.Tx)
+					raw, _ := base64.StdEncoding.DecodeString(req.Params.Tx)
+					var wire txtypes.TxRaw
+					var body txtypes.TxBody
+					var auth txtypes.AuthInfo
+					if err := wire.Unmarshal(raw); err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					if err := body.Unmarshal(wire.BodyBytes); err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					if err := auth.Unmarshal(wire.AuthInfoBytes); err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					if len(body.Messages) != 1 || body.Messages[0].TypeUrl != "/cosmos.bank.v1beta1.MsgMultiSend" || len(auth.SignerInfos) != 1 || len(wire.Signatures) != 1 {
+						t.Error("expected one signed bank multisend")
+						w.WriteHeader(400)
+						return
+					}
+					var msg banktypes.MsgMultiSend
+					if err := msg.Unmarshal(body.Messages[0].Value); err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					if len(msg.Inputs) != 1 || len(msg.Outputs) != workload.ops || msg.Inputs[0].Coins.AmountOf("urp1").Int64() != int64(workload.ops) || auth.Fee.Amount.AmountOf("urp1").Int64() != 2 {
+						t.Error("incorrect batch output or fee accounting")
+						w.WriteHeader(400)
+						return
+					}
+					for _, out := range msg.Outputs {
+						if out.Coins.AmountOf("urp1").Int64() != 1 {
+							t.Error("output must transfer one urp1")
+							w.WriteHeader(400)
+							return
+						}
+						if out.Address != nextPeer[msg.Inputs[0].Address] {
+							t.Errorf("output must transfer to the next worker account: got %s want %s", out.Address, nextPeer[msg.Inputs[0].Address])
+							w.WriteHeader(400)
+							return
+						}
+					}
+					signer := msg.Inputs[0].Address
+					if auth.SignerInfos[0].Sequence != sequences[signer] {
+						t.Error("incorrect account sequence")
+						w.WriteHeader(400)
+						return
+					}
+					sequences[signer]++
+					var pub secp256k1.PubKey
+					if err := pub.Unmarshal(auth.SignerInfos[0].PublicKey.Value); err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					signDoc := txtypes.SignDoc{BodyBytes: wire.BodyBytes, AuthInfoBytes: wire.AuthInfoBytes, ChainId: "fixture-1", AccountNumber: 1}
+					signBytes, err := signDoc.Marshal()
+					if err != nil || sdk.AccAddress(pub.Address()).String() != signer || !pub.VerifySignature(signBytes, wire.Signatures[0]) {
+						t.Error("invalid SIGN_MODE_DIRECT signature or signer")
+						w.WriteHeader(400)
+						return
+					}
+					byHash[sha256Hex(raw)] = raw
+					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"code":0,"hash":"` + sha256Hex(raw) + `"}}`))
+				case "tx":
+					raw := byHash[strings.ToUpper(req.Params.Hash[2:])]
+					if raw == nil {
+						_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"message":"unknown hash"}}`))
+						return
+					}
+					h := sha256Hex(raw)
+					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"hash":"` + h + `","height":"1","tx":"` + base64.StdEncoding.EncodeToString(raw) + `","tx_result":{"code":0}}}`))
+				default:
+					_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+				}
+			}))
+			defer server.Close()
+			seedPath := filepath.Join(t.TempDir(), "seeds.json")
+			payload, _ := json.Marshal(seedFile{ChainID: "fixture-1", Accounts: seeds})
+			if err := os.WriteFile(seedPath, payload, 0600); err != nil {
+				t.Fatal(err)
 			}
-			signer := msg.Inputs[0].Address
-			if auth.SignerInfos[0].Sequence != sequences[signer] {
-				t.Error("incorrect account sequence")
-				w.WriteHeader(400)
-				return
+			output := fixtureOutput(t)
+			if err := run(context.Background(), server.URL, server.URL, "fixture-1", seedPath, "urp1", output, workload.duration, time.Second, time.Millisecond, workload.workers, workload.ops, 0, 2, workload.envelopes); err != nil {
+				t.Fatal(err)
 			}
-			sequences[signer]++
-			var pub secp256k1.PubKey
-			if err := pub.Unmarshal(auth.SignerInfos[0].PublicKey.Value); err != nil {
-				t.Error(err)
-				w.WriteHeader(400)
-				return
+			if workload.pressure && maxActiveTx.Load() > 8 {
+				t.Fatalf("receipt lookup concurrency reached %d", maxActiveTx.Load())
 			}
-			signDoc := txtypes.SignDoc{BodyBytes: wire.BodyBytes, AuthInfoBytes: wire.AuthInfoBytes, ChainId: "fixture-1", AccountNumber: 1}
-			signBytes, err := signDoc.Marshal()
-			if err != nil || sdk.AccAddress(pub.Address()).String() != signer || !pub.VerifySignature(signBytes, wire.Signatures[0]) {
-				t.Error("invalid SIGN_MODE_DIRECT signature or signer")
-				w.WriteHeader(400)
-				return
+			mu.Lock()
+			count := len(submitted)
+			mu.Unlock()
+			if workload.envelopes > 0 && (count != workload.envelopes) {
+				t.Fatalf("finite workload submitted %d envelopes, expected %d", count, workload.envelopes)
 			}
-			byHash[sha256Hex(raw)] = raw
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"code":0,"hash":"` + sha256Hex(raw) + `"}}`))
-		case "tx":
-			raw := byHash[strings.ToUpper(req.Params.Hash[2:])]
-			if raw == nil {
-				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"message":"unknown hash"}}`))
-				return
+			if count == 0 {
+				t.Fatal("fixture did not receive a signed envelope")
 			}
-			h := sha256Hex(raw)
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"hash":"` + h + `","height":"1","tx":"` + base64.StdEncoding.EncodeToString(raw) + `","tx_result":{"code":0}}}`))
-		default:
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
-		}
-	}))
-	defer server.Close()
-	seedPath := filepath.Join(t.TempDir(), "seeds.json")
-	payload, _ := json.Marshal(seedFile{ChainID: "fixture-1", Accounts: seeds})
-	if err := os.WriteFile(seedPath, payload, 0600); err != nil {
-		t.Fatal(err)
+			artifact, err := os.ReadFile(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result result
+			if err := json.Unmarshal(artifact, &result); err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Attempts) != count || result.CommittedOperations != int64(workload.ops*count) || result.SuccessfulEnvelopes != int64(count) || result.RunError != "" {
+				t.Fatalf("artifact totals do not match observed signed work: %s", artifact)
+			}
+			if result.RequestedEnvelopes != workload.envelopes {
+				t.Fatalf("requested workload missing from artifact: %d", result.RequestedEnvelopes)
+			}
+			for _, attempt := range result.Attempts {
+				raw, err := base64.StdEncoding.DecodeString(attempt.SignedTxBase64)
+				if err != nil || sha256Hex(raw) != attempt.Hash || attempt.ObservedAt == nil || attempt.Outcome != "committed" {
+					t.Fatalf("incomplete raw observation: %+v", attempt)
+				}
+			}
+			t.Logf("signed fixture artifact: %s", output)
+		})
 	}
-	output := fixtureOutput(t)
-	if err := run(context.Background(), server.URL, server.URL, "fixture-1", seedPath, "urp1", output, 20*time.Millisecond, time.Second, time.Millisecond, 2, 2, 0, 2); err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	count := len(submitted)
-	mu.Unlock()
-	if count == 0 {
-		t.Fatal("fixture did not receive a signed envelope")
-	}
-	artifact, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var result result
-	if err := json.Unmarshal(artifact, &result); err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Attempts) != count || result.CommittedOperations != int64(2*count) || result.SuccessfulEnvelopes != int64(count) || result.RunError != "" {
-		t.Fatalf("artifact totals do not match observed signed work: %s", artifact)
-	}
-	for _, attempt := range result.Attempts {
-		raw, err := base64.StdEncoding.DecodeString(attempt.SignedTxBase64)
-		if err != nil || sha256Hex(raw) != attempt.Hash || attempt.ObservedAt == nil || attempt.Outcome != "committed" {
-			t.Fatalf("incomplete raw observation: %+v", attempt)
-		}
-	}
-	t.Logf("signed fixture artifact: %s", output)
 }
 
 func configurePrefixes() {
@@ -238,7 +288,7 @@ func TestRunFixtureFailureOutcomes(t *testing.T) {
 			if err := os.WriteFile(seedPath, payload, 0600); err != nil {
 				t.Fatal(err)
 			}
-			err := run(context.Background(), server.URL, server.URL, "fixture-1", seedPath, "urp1", output, 10*time.Millisecond, 25*time.Millisecond, time.Millisecond, 1, 2, 0, 2)
+			err := run(context.Background(), server.URL, server.URL, "fixture-1", seedPath, "urp1", output, 10*time.Millisecond, 25*time.Millisecond, time.Millisecond, 1, 2, 0, 2, 0)
 			if err == nil {
 				t.Fatal("failed benchmark must return an error")
 			}
@@ -262,6 +312,109 @@ func TestRunFixtureFailureOutcomes(t *testing.T) {
 			}
 			t.Logf("failure artifact: %s", output)
 		})
+	}
+}
+
+func TestRunFiniteEnvelopeHonorsAdmissionWindow(t *testing.T) {
+	seeds := fixtureSeeds(t, 1)
+	var submitted atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/cosmos/auth/") {
+			_, _ = w.Write([]byte(`{"account":{"account_number":"1","sequence":"0"}}`))
+			return
+		}
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		if req.Method == "status" {
+			_, _ = w.Write([]byte(`{"result":{"node_info":{"network":"fixture-1"},"consensus_running":true,"sync_info":{"catching_up":false}}}`))
+			return
+		}
+		if req.Method == "broadcast_tx_sync" {
+			submitted.Add(1)
+		}
+		_, _ = w.Write([]byte(`{"result":{}}`))
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	seedPath, output := filepath.Join(dir, "seeds.json"), filepath.Join(dir, "result.json")
+	payload, _ := json.Marshal(seedFile{ChainID: "fixture-1", Accounts: seeds})
+	if err := os.WriteFile(seedPath, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := run(context.Background(), server.URL, server.URL, "fixture-1", seedPath, "urp1", output, time.Nanosecond, time.Second, time.Millisecond, 1, 6137, 0, 2, 1)
+	if err == nil {
+		t.Fatal("finite workload past its admission window must fail")
+	}
+	if got := submitted.Load(); got != 0 {
+		t.Fatalf("finite workload broadcast %d envelopes after deadline", got)
+	}
+}
+
+func TestRPCClientReusesConnectionsForConcurrentPolling(t *testing.T) {
+	const workers = 16
+	var connections atomic.Int32
+	var gateMu sync.Mutex
+	var gate chan struct{}
+	started := make(chan struct{}, workers)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gateMu.Lock()
+		current := gate
+		gateMu.Unlock()
+		started <- struct{}{}
+		select {
+		case <-current:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"ok":true}}`))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+	rpc := newRPCClient(server.URL, workers)
+	defer rpc.http.CloseIdleConnections()
+	for wave := 0; wave < 4; wave++ {
+		gateMu.Lock()
+		gate = make(chan struct{})
+		current := gate
+		gateMu.Unlock()
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				var result struct {
+					OK bool `json:"ok"`
+				}
+				if err := rpc.call(ctx, "status", map[string]any{}, &result); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		for i := 0; i < workers; i++ {
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				close(current)
+				wg.Wait()
+				t.Fatal("concurrent polling requests did not reach the server")
+			}
+		}
+		close(current)
+		wg.Wait()
+	}
+	if got := connections.Load(); got > workers {
+		t.Fatalf("polling waves opened %d connections for %d workers; expected idle reuse", got, workers)
 	}
 }
 

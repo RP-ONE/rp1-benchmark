@@ -60,6 +60,7 @@ type account struct {
 type rpcClient struct {
 	endpoint string
 	http     *http.Client
+	txSlots  chan struct{}
 	id       atomic.Uint64
 }
 type rpcResponse struct {
@@ -109,7 +110,7 @@ func main() {
 	cfg.Seal()
 	var rpc, rest, chainID, seeds, denom, output string
 	var duration, finalityTimeout, poll time.Duration
-	var concurrency, ops int
+	var concurrency, ops, envelopes int
 	var gas, fee uint64
 	flag.StringVar(&rpc, "rpc", "http://127.0.0.1:26657", "RP1 JSON-RPC endpoint")
 	flag.StringVar(&rest, "rest", "", "Cosmos REST endpoint (defaults to rpc host port 1317)")
@@ -122,20 +123,21 @@ func main() {
 	flag.DurationVar(&poll, "poll", 50*time.Millisecond, "committed transaction query cadence")
 	flag.IntVar(&concurrency, "concurrency", 20, "simultaneous signed envelopes")
 	flag.IntVar(&ops, "operations-per-envelope", 100, "number of MsgMultiSend outputs in each envelope")
+	flag.IntVar(&envelopes, "envelopes", 0, "exact number of envelopes to submit; 0 uses the duration window")
 	flag.Uint64Var(&gas, "gas", 0, "gas limit per envelope; 0 estimates 100000 + 15000 per output")
 	flag.Uint64Var(&fee, "fee-urp1", 2, "native fee per signed envelope in urp1")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if err := run(ctx, rpc, rest, chainID, seeds, denom, output, duration, finalityTimeout, poll, concurrency, ops, gas, fee); err != nil {
+	if err := run(ctx, rpc, rest, chainID, seeds, denom, output, duration, finalityTimeout, poll, concurrency, ops, gas, fee, envelopes); err != nil {
 		fmt.Fprintln(os.Stderr, "rp1-benchmark:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output string, duration, finality, poll time.Duration, concurrency, operations int, gas, fee uint64) error {
-	if chainID == "" || seedPath == "" || concurrency < 1 || concurrency > 4096 || operations < 1 || operations > 100000 || duration <= 0 || finality <= 0 || poll <= 0 || fee > math.MaxInt64 {
-		return errors.New("chain ID, seed file, positive duration/finality/poll, concurrency 1..4096, operations 1..100000 and an integer fee within int64 are required")
+func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output string, duration, finality, poll time.Duration, concurrency, operations int, gas, fee uint64, envelopes int) error {
+	if chainID == "" || seedPath == "" || concurrency < 1 || concurrency > 4096 || operations < 1 || operations > 100000 || envelopes < 0 || duration <= 0 || finality <= 0 || poll <= 0 || fee > math.MaxInt64 {
+		return errors.New("chain ID, seed file, positive duration/finality/poll, concurrency 1..4096, operations 1..100000, non-negative envelopes and an integer fee within int64 are required")
 	}
 	if denom != "urp1" {
 		return errors.New("this native workload supports urp1 only")
@@ -163,7 +165,8 @@ func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output 
 	if seeds.ChainID != chainID || len(seeds.Accounts) < concurrency {
 		return fmt.Errorf("seed file chain_id must equal %q and contain at least %d accounts", chainID, concurrency)
 	}
-	rpc := &rpcClient{endpoint: strings.TrimRight(rpcURL, "/"), http: &http.Client{Timeout: 15 * time.Second}}
+	rpc := newRPCClient(rpcURL, concurrency)
+	defer rpc.http.CloseIdleConnections()
 	var status struct {
 		NodeInfo struct {
 			Network string `json:"network"`
@@ -218,6 +221,7 @@ func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output 
 	var mu sync.Mutex
 	observations := make([]observation, 0)
 	var runErr error
+	var issued atomic.Int64
 	add := func(ob observation, err error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -231,8 +235,18 @@ func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output 
 		go func(i int) {
 			defer wg.Done()
 			acc := accounts[i]
-			for time.Now().Before(deadline) && ctx.Err() == nil {
-				raw, hash, err := buildTx(clientCtx, acc, accounts, acc.sequence, denom, operations, gas, fee)
+			for ctx.Err() == nil {
+				if !time.Now().Before(deadline) {
+					return
+				}
+				if envelopes > 0 {
+					n := issued.Add(1)
+					if n > int64(envelopes) {
+						return
+					}
+				}
+				next := accounts[(i+1)%len(accounts)]
+				raw, hash, err := buildTx(clientCtx, acc, next, acc.sequence, denom, operations, gas, fee)
 				if err != nil {
 					add(observation{Signer: acc.address.String(), Sequence: acc.sequence, Outcome: "signing_failed", Error: err.Error()}, err)
 					return
@@ -284,9 +298,12 @@ func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output 
 	if len(observations) == 0 && runErr == nil {
 		runErr = errors.New("no signed attempts completed; increase the duration")
 	}
+	if envelopes > 0 && runErr == nil && len(observations) != envelopes {
+		runErr = fmt.Errorf("finite workload committed %d of %d requested envelopes", len(observations), envelopes)
+	}
 	finished := time.Now()
 	sort.Slice(observations, func(i, j int) bool { return observations[i].SubmittedAt.Before(observations[j].SubmittedAt) })
-	result := makeReport(chainID, rpcURL, started, finished, duration, poll, concurrency, operations, gas, fee, observations, runErr)
+	result := makeReport(chainID, rpcURL, started, finished, duration, poll, concurrency, operations, gas, fee, envelopes, observations, runErr)
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return err
@@ -314,6 +331,7 @@ type result struct {
 	Gas                      uint64        `json:"gas_limit"`
 	Fee                      uint64        `json:"fee_urp1"`
 	SignedEnvelopes          int64         `json:"signed_envelopes"`
+	RequestedEnvelopes       int           `json:"requested_envelopes,omitempty"`
 	QueuedEnvelopes          int64         `json:"queued_envelopes"`
 	CommittedEnvelopes       int64         `json:"committed_envelopes"`
 	SuccessfulEnvelopes      int64         `json:"successful_envelopes"`
@@ -330,8 +348,8 @@ type result struct {
 	Note                     string        `json:"note"`
 }
 
-func makeReport(chain, rpc string, started, finished time.Time, window, poll time.Duration, c, ops int, gas, fee uint64, observations []observation, runErr error) result {
-	r := result{ChainID: chain, RPC: rpc, Mode: "live", StartedAt: started, FinishedAt: finished, DurationSeconds: finished.Sub(started).Seconds(), AdmissionWindowSeconds: window.Seconds(), PollSeconds: poll.Seconds(), Concurrency: c, OperationsPerEnvelope: ops, Gas: gas, Fee: fee, WorkersStopped: true, Attempts: observations, Note: "Operations are successful MsgMultiSend outputs; envelope rate counts signed attempts, including failures. Rates cover the entire workflow including drain. This client has no validator-resource or cluster-convergence release gate and does not reproduce historical peak claims. Finality includes committed execution failures; fewer than 20 samples cannot support a finality claim."}
+func makeReport(chain, rpc string, started, finished time.Time, window, poll time.Duration, c, ops int, gas, fee uint64, requested int, observations []observation, runErr error) result {
+	r := result{ChainID: chain, RPC: rpc, Mode: "live", StartedAt: started, FinishedAt: finished, DurationSeconds: finished.Sub(started).Seconds(), AdmissionWindowSeconds: window.Seconds(), PollSeconds: poll.Seconds(), Concurrency: c, OperationsPerEnvelope: ops, Gas: gas, Fee: fee, RequestedEnvelopes: requested, WorkersStopped: true, Attempts: observations, Note: "Operations are successful MsgMultiSend outputs; envelope rate counts signed attempts, including failures. Rates cover the entire workflow including drain. This client has no validator-resource or cluster-convergence release gate and does not reproduce historical peak claims. Finality includes committed execution failures; fewer than 20 samples cannot support a finality claim."}
 	if runErr != nil {
 		r.RunError = runErr.Error()
 	}
@@ -381,11 +399,10 @@ func encodingConfig() encodingConfigValue {
 	c := codec.NewProtoCodec(r)
 	return encodingConfigValue{Codec: c, TxConfig: authtx.NewTxConfig(c, []signing.SignMode{signing.SignMode_SIGN_MODE_DIRECT})}
 }
-func buildTx(ctx client.Context, from account, all []account, sequence uint64, denom string, operations int, gas, fee uint64) ([]byte, string, error) {
+func buildTx(ctx client.Context, from, to account, sequence uint64, denom string, operations int, gas, fee uint64) ([]byte, string, error) {
 	outs := make([]banktypes.Output, operations)
 	for i := range outs {
-		to := all[(i+1)%len(all)].address
-		outs[i] = banktypes.Output{Address: to.String(), Coins: sdk.NewCoins(sdk.NewInt64Coin(denom, 1))}
+		outs[i] = banktypes.Output{Address: to.address.String(), Coins: sdk.NewCoins(sdk.NewInt64Coin(denom, 1))}
 	}
 	msg := &banktypes.MsgMultiSend{Inputs: []banktypes.Input{{Address: from.address.String(), Coins: sdk.NewCoins(sdk.NewInt64Coin(denom, int64(operations)))}}, Outputs: outs}
 	f := tx.Factory{}.WithChainID(ctx.ChainID).WithTxConfig(ctx.TxConfig).WithKeybase(ctx.Keyring).WithFromName(from.name).WithAccountNumber(from.number).WithSequence(sequence).WithGas(gas).WithFees(fmt.Sprintf("%d%s", fee, denom))
@@ -402,6 +419,18 @@ func buildTx(ctx client.Context, from account, all []account, sequence uint64, d
 	}
 	h := sha256.Sum256(raw)
 	return raw, strings.ToUpper(hex.EncodeToString(h[:])), nil
+}
+
+func newRPCClient(endpoint string, concurrency int) *rpcClient {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = concurrency
+	transport.MaxIdleConns = concurrency
+	transport.MaxConnsPerHost = concurrency
+	lookupConcurrency := concurrency
+	if lookupConcurrency > 8 {
+		lookupConcurrency = 8
+	}
+	return &rpcClient{endpoint: strings.TrimRight(endpoint, "/"), http: &http.Client{Timeout: 15 * time.Second, Transport: transport}, txSlots: make(chan struct{}, lookupConcurrency)}
 }
 
 func (r *rpcClient) broadcast(ctx context.Context, raw []byte) error {
@@ -434,7 +463,13 @@ func (r *rpcClient) waitTx(ctx context.Context, hash string, expected []byte, po
 				Code uint32 `json:"code"`
 			} `json:"tx_result"`
 		}
+		select {
+		case r.txSlots <- struct{}{}:
+		case <-ctx.Done():
+			return 0, 0, ctx.Err()
+		}
 		err := r.call(ctx, "tx", map[string]string{"hash": "0x" + hash}, &v)
+		<-r.txSlots
 		if err == nil {
 			h, parseErr := strconv.ParseInt(v.Height, 10, 64)
 			decoded, decodeErr := base64.StdEncoding.DecodeString(v.Tx)
@@ -469,11 +504,18 @@ func (r *rpcClient) call(ctx context.Context, method string, params any, out any
 		return err
 	}
 	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
+	if err != nil {
+		return err
+	}
+	if len(responseBody) > 8<<20 {
+		return errors.New("RPC response exceeds 8 MiB limit")
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("rpc HTTP %s", resp.Status)
 	}
 	var envelope rpcResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&envelope); err != nil {
+	if err := json.Unmarshal(responseBody, &envelope); err != nil {
 		return err
 	}
 	if envelope.Error != nil {

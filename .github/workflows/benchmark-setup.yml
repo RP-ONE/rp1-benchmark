@@ -39,10 +39,28 @@ jobs:
               setup = json.loads((root / (prefix + 'setup.json')).read_text())
               result = json.loads((root / (prefix + 'result.json')).read_text())
               assert setup['complete'] and len(setup['validators']) == 4
+              assert len(setup['terminal_validators']) == 4
+              assert len({json.dumps(node['header'], sort_keys=True) for node in setup['terminal_validators']}) == 1
               assert not result.get('run_error') and result['workers_stopped']
               assert result['successful_envelopes'] >= 20
               assert result['signed_envelopes'] == result['successful_envelopes']
           PY
+      - name: Exact 6,137-output workload on a fresh private network
+        run: |
+          python3 scripts/benchmark.py private --profile legacy-6137
+          python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          root = Path('.rp1-benchmark/legacy-6137')
+          setup = json.loads((root / 'setup.json').read_text())
+          result = json.loads((root / 'result.json').read_text())
+          assert setup['complete'] and len(setup['validators']) == 4
+          assert len(setup['terminal_validators']) == 4
+          assert len({json.dumps(node['header'], sort_keys=True) for node in setup['terminal_validators']}) == 1
+          assert not result.get('run_error') and result['workers_stopped']
+          assert result['requested_envelopes'] == result['successful_envelopes'] == result['signed_envelopes'] == 100
+          assert result['operations_per_envelope'] == 6137 and result['committed_operations'] == 613700
+          PYTHON
       - name: Retain public evidence only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -54,5 +72,8 @@ jobs:
             .rp1-benchmark/private/validators.log
             .rp1-benchmark/private/initial-setup.json
             .rp1-benchmark/private/initial-result.json
+            .rp1-benchmark/legacy-6137/setup.json
+            .rp1-benchmark/legacy-6137/result.json
+            .rp1-benchmark/legacy-6137/validators.log
           include-hidden-files: true
           if-no-files-found: warn

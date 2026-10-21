@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -68,6 +69,68 @@ class SetupChecks(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
+
+    def test_legacy_profile_runs_exact_batched_workload(self):
+        captured = []
+        def run(args, state, artifact):
+            captured.append((args.envelopes, args.operations_per_envelope, args.concurrency, args.duration,
+                             args.poll, args.finality_timeout))
+        argv = ["benchmark.py", "private", "--profile", "legacy-6137", "--state-dir", str(self.root)]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(benchmark.platform, "system", return_value="Linux"), \
+                mock.patch.object(benchmark.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(benchmark, "run_private", side_effect=run):
+            self.assertEqual(benchmark.main(), 0)
+        self.assertEqual(captured, [(100, 6137, 100, "120s", "50ms", "120s")])
+
+    def test_quickstart_then_legacy_profile_preserves_both_networks(self):
+        visited = []
+        def run(args, state, artifact):
+            visited.append((state, args.concurrency))
+            marker = state / "funded-account-count.txt"
+            if marker.exists():
+                self.assertEqual(marker.read_text(), str(args.concurrency))
+            marker.write_text(str(args.concurrency))
+        with mock.patch.object(benchmark, "ROOT", self.root), \
+                mock.patch.object(benchmark.platform, "system", return_value="Linux"), \
+                mock.patch.object(benchmark.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(benchmark, "run_private", side_effect=run):
+            for extra in ([], ["--profile", "legacy-6137"], []):
+                with mock.patch.object(sys, "argv", ["benchmark.py", "private", *extra]):
+                    self.assertEqual(benchmark.main(), 0)
+        self.assertEqual([accounts for _, accounts in visited], [20, 100, 20])
+        self.assertEqual(visited[0][0], visited[2][0])
+        self.assertNotEqual(visited[0][0], visited[1][0])
+        for directory, accounts in visited[:2]:
+            self.assertEqual((directory / "funded-account-count.txt").read_text(), str(accounts))
+
+    def test_legacy_profile_allows_explicit_cadence_and_timeout(self):
+        captured = []
+        def run(args, state, artifact):
+            captured.append((args.poll, args.finality_timeout))
+        argv = ["benchmark.py", "private", "--profile", "legacy-6137", "--poll", "5ms",
+                "--finality-timeout", "45s", "--state-dir", str(self.root)]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(benchmark.platform, "system", return_value="Linux"), \
+                mock.patch.object(benchmark.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(benchmark, "run_private", side_effect=run):
+            self.assertEqual(benchmark.main(), 0)
+        self.assertEqual(captured, [("5ms", "45s")])
+
+    def test_run_benchmark_forwards_finality_timeout_and_poll(self):
+        args = type("Args", (), {
+            "chain_id": "fixture-1", "duration": "20s", "concurrency": 2,
+            "operations_per_envelope": 6137, "envelopes": 100, "fee_urp1": 0,
+            "gas": 0, "poll": "50ms", "finality_timeout": "45s",
+        })()
+        artifact = self.root / "result.json"
+        artifact.write_text(json.dumps({"successful_envelopes": 100,
+                                        "operations_per_second": 123.0,
+                                        "finality_p95": 0.4}))
+        with mock.patch.object(benchmark.subprocess, "run") as run:
+            benchmark.run_benchmark(args, self.root / "rp1-benchmark", self.root / "accounts.json",
+                                    "http://rpc", "http://rest", artifact)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--poll") + 1], "50ms")
+        self.assertEqual(command[command.index("--finality-timeout") + 1], "45s")
 
     def test_head_convergence_requires_matching_state(self):
         endpoints = [self.first.url, self.second.url]
