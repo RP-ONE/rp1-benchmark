@@ -47,7 +47,7 @@ jobs:
           PY
       - name: Exact 6,137-output workload on a fresh private network
         run: |
-          python3 scripts/benchmark.py private --profile legacy-6137 --state-dir .rp1-benchmark/legacy-6137
+          python3 scripts/benchmark.py private --profile legacy-6137
           python3 - <<'PYTHON'
           import json
           from pathlib import Path

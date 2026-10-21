@@ -4,7 +4,7 @@ Run signed, batched RP1 benchmarks with an automatically provisioned private val
 
 ## Private benchmark: one command
 
-Use Python **3.10+** and Git. On macOS/ARM, run a local Docker-compatible engine with QEMU Linux x86-64 emulation; the command below automatically runs the public setup inside a local container, including Go. On native Linux x86-64, install Go **1.24+**. For a four-validator evaluation, provision a host with at least 8 CPU cores, 16 GiB RAM, SSD storage, and 20 GiB free disk. This is a starting configuration, not a performance guarantee. For capacity measurements, place the load generator on a separate host using the manual client command below. The published validator is Linux x86-64. The 0.25.4 binary requires ADX instructions and fails under Rosetta; use a QEMU-based engine on Apple Silicon. Apple Silicon runs it through local instruction translation, which is suitable for customer setup and integration checks; measure native capacity on dedicated Linux x86-64 hardware. Allocate at least 8 CPUs and 16 GiB RAM to the local engine for a four-validator evaluation. No server login or private repository is needed.
+Use Python **3.10+** and Git. On macOS/ARM, run a local Docker-compatible engine with Linux x86-64 translation; the command below automatically runs the public setup inside a local container, including Go. On native Linux x86-64, install Go **1.24+**. For a four-validator evaluation, provision a host with at least 8 CPU cores, 16 GiB RAM, SSD storage, and 20 GiB free disk. This is a starting configuration, not a performance guarantee. For capacity measurements, place the load generator on a separate host using the manual client command below. The published validator is Linux x86-64. Apple Silicon runs it through local instruction translation, which is suitable for customer setup and integration checks; measure native capacity on dedicated Linux x86-64 hardware. Allocate at least 8 CPUs and 16 GiB RAM to the local engine for a four-validator evaluation. No server login or private repository is needed.
 
 ```sh
 git clone https://github.com/RP-ONE/rp1-benchmark.git
@@ -14,7 +14,7 @@ python3 scripts/benchmark.py private
 
 That command:
 
-1. Downloads `rp1d` **0.25.4** and the public licence, notices, provenance, checksums, and signature bundle.
+1. Downloads `rp1d` **0.25.6** and the public licence, notices, provenance, checksums, and signature bundle.
 2. Checks the pinned signed-manifest digest, all asset checksums, archive layout, and provenance before making the binary executable.
 3. Builds the benchmark client and starts **four validators**, using 20 ms batching and 50 ms consensus rounds.
 4. Generates **20 fresh accounts funded in genesis**. Keys stay in a private local directory; no shared funded wallet or faucet key is published.
@@ -33,7 +33,7 @@ Outputs are in `.rp1-benchmark/private/`:
 | `network/rp1-benchmark-1/seed-accounts/accounts.json` | Locally generated test keys; keep private |
 | `validator/release-assets/` | Verified distribution assets, licence, and notices |
 
-Repeat the same command to reuse the persisted chain and accounts. A concurrent run is refused. Changing the validator/account count requires a new state directory, preserving the previous network:
+Repeat the same command to reuse the persisted chain and accounts. A concurrent run is refused. Changing the validator/account count or validator release version requires a new state directory, preserving the previous network:
 
 ```sh
 python3 scripts/benchmark.py private \
@@ -49,6 +49,8 @@ python3 scripts/benchmark.py private \
 ```sh
 python3 scripts/benchmark.py private --profile legacy-6137
 ```
+
+This profile stores its state and evidence in `.rp1-benchmark/legacy-6137/`, so it can run after the quickstart without replacing that network or its funded accounts.
 
 This starts four local validators and sends **exactly 100 signed envelopes with 6,137 outputs each**, totaling **613,700 operations**, with up to 100 envelopes in flight. It generates 100 funded local accounts. Within each envelope, every output is a distinct one-`urp1` transfer to that worker's next funded peer account, matching the historical ring workload shape without aggregating outputs. The admission deadline is 120 seconds; reaching it before the requested work completes fails the run and retains partial evidence. The legacy profile allows 120 seconds per transaction for committed observation and polls every 50 ms. At most eight receipt downloads run simultaneously while all 100 envelopes may remain in flight. The reported latency includes that observation time; a longer timeout does not establish a finality target. Use `--poll 5ms` when you explicitly need the normal client cadence, or `--finality-timeout 180s` for a longer observation window. Adjust `--concurrency` or `--duration` for the machine while retaining the exact output and envelope counts. For example, `--concurrency 20 --duration 180s` sends the same total work with fewer envelopes in flight.
 
@@ -104,7 +106,7 @@ The client signs standard Cosmos `bank.MsgMultiSend` transactions with `SIGN_MOD
 
 ## Run the client separately
 
-Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.25.4) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
+Use Go 1.24 or newer and point the client at running RP1 RPC and REST endpoints. The [official validator release](https://github.com/RP-ONE/rp1-releases/releases/tag/0.25.6) supplies `rp1d` without private-source access. The automated private setup above installs it and creates the funded seed file for you.
 
 Create a seed file with funded accounts. Keep it outside the repository and mode `0600`:
 
