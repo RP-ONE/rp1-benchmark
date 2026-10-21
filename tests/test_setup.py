@@ -82,6 +82,27 @@ class SetupChecks(unittest.TestCase):
             self.assertEqual(benchmark.main(), 0)
         self.assertEqual(captured, [(100, 6137, 100, "120s", "50ms", "120s")])
 
+    def test_quickstart_then_legacy_profile_preserves_both_networks(self):
+        visited = []
+        def run(args, state, artifact):
+            visited.append((state, args.concurrency))
+            marker = state / "funded-account-count.txt"
+            if marker.exists():
+                self.assertEqual(marker.read_text(), str(args.concurrency))
+            marker.write_text(str(args.concurrency))
+        with mock.patch.object(benchmark, "ROOT", self.root), \
+                mock.patch.object(benchmark.platform, "system", return_value="Linux"), \
+                mock.patch.object(benchmark.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(benchmark, "run_private", side_effect=run):
+            for extra in ([], ["--profile", "legacy-6137"], []):
+                with mock.patch.object(sys, "argv", ["benchmark.py", "private", *extra]):
+                    self.assertEqual(benchmark.main(), 0)
+        self.assertEqual([accounts for _, accounts in visited], [20, 100, 20])
+        self.assertEqual(visited[0][0], visited[2][0])
+        self.assertNotEqual(visited[0][0], visited[1][0])
+        for directory, accounts in visited[:2]:
+            self.assertEqual((directory / "funded-account-count.txt").read_text(), str(accounts))
+
     def test_legacy_profile_allows_explicit_cadence_and_timeout(self):
         captured = []
         def run(args, state, artifact):

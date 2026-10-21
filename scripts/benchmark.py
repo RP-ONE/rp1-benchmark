@@ -496,7 +496,7 @@ def main():
     args.chain_id = "rp1-benchmark-1" if args.mode == "private" else "chain-1"
     if args.mode == "private" and args.fee_urp1 is None:
         args.fee_urp1 = 0
-    state = (args.state_dir or ROOT / ".rp1-benchmark" / args.mode).absolute()
+    state = (args.state_dir or ROOT / ".rp1-benchmark" / (args.profile or args.mode)).absolute()
     config = {"mode": args.mode, "chain_id": args.chain_id,
               "validators": args.validators if args.mode == "private" else None,
               "accounts": args.concurrency, "validator_version": VERSION if args.mode != "testnet" else None}
