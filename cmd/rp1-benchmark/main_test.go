@@ -49,6 +49,10 @@ func TestRunFixtureBindsSignedMultisendAndPersistsResult(t *testing.T) {
 			var activeTx, maxActiveTx atomic.Int32
 			var submitted []string
 			sequences := map[string]uint64{}
+			nextPeer := make(map[string]string, len(seeds))
+			for i, seed := range seeds {
+				nextPeer[seed.Address] = seeds[(i+1)%len(seeds)].Address
+			}
 			byHash := map[string][]byte{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasPrefix(r.URL.Path, "/cosmos/auth/") {
@@ -125,6 +129,11 @@ func TestRunFixtureBindsSignedMultisendAndPersistsResult(t *testing.T) {
 					for _, out := range msg.Outputs {
 						if out.Coins.AmountOf("urp1").Int64() != 1 {
 							t.Error("output must transfer one urp1")
+							w.WriteHeader(400)
+							return
+						}
+						if out.Address != nextPeer[msg.Inputs[0].Address] {
+							t.Errorf("output must transfer to the next worker account: got %s want %s", out.Address, nextPeer[msg.Inputs[0].Address])
 							w.WriteHeader(400)
 							return
 						}

@@ -245,7 +245,8 @@ func run(ctx context.Context, rpcURL, restURL, chainID, seedPath, denom, output 
 						return
 					}
 				}
-				raw, hash, err := buildTx(clientCtx, acc, accounts, acc.sequence, denom, operations, gas, fee)
+				next := accounts[(i+1)%len(accounts)]
+				raw, hash, err := buildTx(clientCtx, acc, next, acc.sequence, denom, operations, gas, fee)
 				if err != nil {
 					add(observation{Signer: acc.address.String(), Sequence: acc.sequence, Outcome: "signing_failed", Error: err.Error()}, err)
 					return
@@ -398,11 +399,10 @@ func encodingConfig() encodingConfigValue {
 	c := codec.NewProtoCodec(r)
 	return encodingConfigValue{Codec: c, TxConfig: authtx.NewTxConfig(c, []signing.SignMode{signing.SignMode_SIGN_MODE_DIRECT})}
 }
-func buildTx(ctx client.Context, from account, all []account, sequence uint64, denom string, operations int, gas, fee uint64) ([]byte, string, error) {
+func buildTx(ctx client.Context, from, to account, sequence uint64, denom string, operations int, gas, fee uint64) ([]byte, string, error) {
 	outs := make([]banktypes.Output, operations)
 	for i := range outs {
-		to := all[(i+1)%len(all)].address
-		outs[i] = banktypes.Output{Address: to.String(), Coins: sdk.NewCoins(sdk.NewInt64Coin(denom, 1))}
+		outs[i] = banktypes.Output{Address: to.address.String(), Coins: sdk.NewCoins(sdk.NewInt64Coin(denom, 1))}
 	}
 	msg := &banktypes.MsgMultiSend{Inputs: []banktypes.Input{{Address: from.address.String(), Coins: sdk.NewCoins(sdk.NewInt64Coin(denom, int64(operations)))}}, Outputs: outs}
 	f := tx.Factory{}.WithChainID(ctx.ChainID).WithTxConfig(ctx.TxConfig).WithKeybase(ctx.Keyring).WithFromName(from.name).WithAccountNumber(from.number).WithSequence(sequence).WithGas(gas).WithFees(fmt.Sprintf("%d%s", fee, denom))
